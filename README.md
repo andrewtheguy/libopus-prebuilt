@@ -195,6 +195,46 @@ wrapper — that is upstream's code, covered by upstream's tests — but underne
   build machine and fails on a slim runtime image, which is the exact failure this repo
   exists to remove.
 
+### Does the audio survive?
+
+Two questions, and only one of them has an exact answer.
+
+**The exact one.** `OPUS_GET_FINAL_RANGE` returns the entropy coder's end state, and if the
+decoder's matches the encoder's for a packet then the decoder walked an identical path
+through that packet's range coder. libopus's own test suite uses it the same way. It is a
+much stronger claim than hashing a bitstream — and unlike a hash it is *valid across
+platforms*, since the AVX2 and NEON archives take different float paths and would produce
+different bytes for reasons that are not bugs. `opus-e2e` asserts it for all 800 packets it
+encodes.
+
+**The approximate one**, because the codec is lossy on purpose. Four signal classes — tone,
+chord, band-limited noise, speech-like — over 48 kHz stereo and mono, 16 kHz and 8 kHz:
+
+| measure | asserted | why |
+|---|---|---|
+| per-band energy error | **≤ 6 dB** | phase-blind, so it survives what the other two trip over. The gate. |
+| correlation | **per signal class** | catches waveform damage that band energy would not |
+| SNR | reported only | collapses on noise by design — CELT preserves band energy there, not the waveform |
+
+The correlation floor travels with the signal (0.99 tone, 0.95 chord and speech, **0.60
+noise**) because one global number cannot work: a healthy encoder round-trips noise at 0.70
+at 8 kHz, and any threshold strict enough to be meaningful for a chord would fail every
+clean build. Worst measured band error across all sixteen combinations is 4.1 dB against
+the 6 dB gate.
+
+Two things learned by measuring rather than reasoning, both of which broke the first
+version of these tests:
+
+- **Alignment cannot be a fixed offset.** `get_lookahead()` is exact — the aperiodic noise
+  signal locks onto it off-by-zero at every rate, which is itself asserted — but periodic
+  content aligns equally well a whole period late, and the speech-like signal genuinely
+  lands 16 samples early at 16 kHz. Forcing the reported value dropped its correlation to
+  0.7180 and failed six checks against a perfectly healthy encoder.
+- **A search window has to leave room for the largest lag it tries.** At 8 kHz a one-second
+  signal is 8000 samples, and a fixed 8192-sample window left room for exactly one
+  candidate. Every metric downstream then compared signals 52 samples apart and reported a
+  broken codec.
+
 ### Leaks
 
 Granting that upstream libopus does not leak, the only way this layer can is a `*_create`
