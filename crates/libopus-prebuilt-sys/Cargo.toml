@@ -17,10 +17,4 @@ build = "build.rs"
 # binary files. Nothing here is fit for crates.io.
 publish = false
 
-[features]
-# Off by default: the x86_64 archives are built for a Coffee Lake floor, which is what
-# the projects consuming this asked for. Turn this on to link the archive that keeps
-# opus's runtime CPU dispatch and runs on any x86_64 — see the README's "CPU floors".
-x86-baseline = []
-
 [dependencies]

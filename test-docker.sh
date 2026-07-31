@@ -19,13 +19,10 @@ cd "$here"
 
 image=libopus-prebuilt-test
 
-# target : docker platform. The x86_64 pair differ only in CPU floor, and testing both
-# is the point: the baseline archive is the fallback for machines the default one will
-# not run on, so "the fallback still works" is a claim worth checking.
+# target : docker platform.
 targets=(
   "linux-aarch64:linux/arm64"
   "linux-x86_64:linux/amd64"
-  "linux-x86_64-baseline:linux/amd64"
 )
 
 want="${1:-}"
@@ -72,15 +69,6 @@ for entry in "${targets[@]}"; do
     echo "    Desktop installs; the GitHub Actions run covers this target either way." >&2
     continue
   }
-  # Without this, a `-baseline` run tests the *other* archive: dist/ is shared with the
-  # earlier runs, sync-prebuilt.sh copies all of it, and cargo's default choice on x86_64
-  # is the AVX2 archive. The feature is how a consumer selects the baseline one, so it is
-  # also the only way to test that the selection works.
-  features=""
-  case "$target" in
-    *-baseline) features="--features opus-prebuilt/x86-baseline" ;;
-  esac
-
   # A per-platform CARGO_TARGET_DIR, because the host's target/ holds macOS artifacts and
   # cargo would rebuild the world on every switch — or worse, try to reuse them. `build/`
   # and `dist/` are already per-target, so those are safe to share, and sharing them means
@@ -93,10 +81,10 @@ for entry in "${targets[@]}"; do
         ./sync-prebuilt.sh
         # --offline proves the point of the exercise: after sync-prebuilt.sh there is
         # nothing left to fetch, so a consumer's build needs no network either.
-        cargo test --offline --workspace $features
+        cargo test --offline --workspace
         # The same end-to-end leg the pipeline runs: a release binary, executed, then
         # checked for a dynamic libopus dependency it must not have.
-        cargo build --offline --release --workspace $features
+        cargo build --offline --release --workspace
         ./target/docker-${platform##*/}/release/opus-e2e | tail -3
         ./check-static.sh ./target/docker-${platform##*/}/release/opus-e2e
         echo

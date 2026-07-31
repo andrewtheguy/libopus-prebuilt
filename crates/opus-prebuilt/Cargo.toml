@@ -20,10 +20,5 @@ publish = false
 name = "opus"
 path = "src/lib.rs"
 
-[features]
-# Passed straight through, so a consumer selects the CPU floor from their own manifest
-# without naming the -sys crate.
-x86-baseline = ["libopus-prebuilt-sys/x86-baseline"]
-
 [dependencies]
 libopus-prebuilt-sys = { path = "../libopus-prebuilt-sys" }

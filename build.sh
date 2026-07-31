@@ -5,12 +5,10 @@
 #   ./build.sh <target>
 #
 # Targets:
-#   macos-arm64                     libopus.a   (Apple silicon, deployment target 11.0)
-#   linux-x86_64                    libopus.a   (x86-64-v3 / Coffee Lake baseline)
-#   linux-x86_64-baseline           libopus.a   (SSE2 baseline, SSE4.1+AVX2 at runtime)
-#   linux-aarch64                   libopus.a   (NEON baseline)
-#   windows-x86_64-msvc             opus.lib    (x86-64-v3, dynamic CRT — see README)
-#   windows-x86_64-msvc-baseline    opus.lib    (SSE2 baseline, dispatch at runtime)
+#   macos-arm64            libopus.a   (Apple silicon, deployment target 11.0)
+#   linux-x86_64           libopus.a   (x86-64-v3 / Coffee Lake floor)
+#   linux-aarch64          libopus.a   (NEON, ARMv8-A)
+#   windows-x86_64-msvc    opus.lib    (x86-64-v3 / Coffee Lake floor, dynamic CRT)
 #
 # Output: dist/<target>/{lib,include}/… plus a MANIFEST naming the version, the
 # checksum, the flags and the SIMD objects that ended up in the archive.
@@ -83,12 +81,15 @@ cflag_supported() {
 # declares. Inert on any CMake that predates the variable.
 cmake_args+=(-DCMAKE_POLICY_VERSION_MINIMUM=3.5)
 
-# The CPU floor each x86_64 target compiles for, asserted after the build. `presume`
-# means the runtime dispatch is compiled out and the SIMD paths are called
-# unconditionally (`OPUS_X86_PRESUME_*`); `dispatch` means opus checks CPUID and
-# chooses, which is what upstream does by default.
-simd_mode=dispatch
-floor='x86-64 baseline (SSE2; SSE4.1/AVX2 by CPUID at runtime)'
+# Every target here compiles out opus's runtime CPU dispatch and calls the SIMD paths
+# unconditionally (`OPUS_X86_PRESUME_*`, `OPUS_PRESUME_NEON`), because every target here
+# names a floor that guarantees them. `simd_mode` is recorded in the MANIFEST and asserted
+# below; there is no longer a target that leaves the dispatch in.
+simd_mode=presume
+# Overwritten by every target below; the `*)` arm exits rather than falling through, so this
+# value never reaches a MANIFEST. It says what it is anyway, because an empty string in a
+# MANIFEST would look like a bug in the build rather than an unreachable default.
+floor='unset'
 
 lib_name=libopus.a
 case "$target" in
@@ -105,7 +106,6 @@ case "$target" in
     # ARMv8.4 with dotprod and fp16 instead of the generic ARMv8-A it assumes
     # otherwise. NEON itself is already unconditional here: opus's cmake sets
     # OPUS_PRESUME_NEON for any aarch64 target (cmake/OpusConfig.cmake:77).
-    simd_mode=presume
     floor='apple-m1 (armv8.4, NEON unconditional)'
     if cflag_supported -mcpu=apple-m1; then
       cflags+=(-mcpu=apple-m1)
@@ -123,40 +123,32 @@ case "$target" in
     # Lake *is* Skylake's microarchitecture, and tuning changes scheduling only, never
     # which instructions are allowed.
     #
-    # Cost of this, stated plainly: the artifact SIGILLs on anything without AVX2.
-    # That is pre-2013 Intel, pre-Zen AMD, and — the one that surprises people — the
-    # Pentium and Celeron parts *of* the Coffee Lake generation, which have AVX2 fused
-    # off. `linux-x86_64-baseline` exists for those.
-    simd_mode=presume
+    # Cost of this, stated plainly and deliberately accepted: the artifact executes an
+    # illegal instruction on anything without AVX2 — pre-2013 Intel, pre-Zen AMD, and the
+    # Pentium and Celeron parts *of* the Coffee Lake generation, where it is fused off.
+    # Coffee Lake is the floor the consuming projects asked for; anything below it wants
+    # its own libopus, which LIBOPUS_PREBUILT_DIR exists for.
     floor='x86-64-v3 / Coffee Lake (AVX2+FMA unconditional)'
     cmake_args+=(-DOPUS_X86_PRESUME_SSE4_1=ON -DOPUS_X86_PRESUME_AVX2=ON)
     cflags+=(-march=x86-64-v3 -mtune=skylake)
-    ;;
-  linux-x86_64-baseline)
-    # Upstream's defaults: SSE2 assumed (it is in the x86_64 ABI), SSE4.1 and AVX2
-    # compiled and chosen by CPUID at runtime. Runs anywhere x86_64 runs.
     ;;
   linux-aarch64)
     floor='armv8-a (NEON unconditional)'
     # No floor to *choose*. Unlike the Mac, arm64 Linux spans a decade of very different
     # cores, and NEON — the part opus actually hand-writes — is mandatory in ARMv8-A
     # and therefore already unconditional.
-    simd_mode=presume
     ;;
-  windows-x86_64-msvc | windows-x86_64-msvc-baseline)
+  windows-x86_64-msvc)
     lib_name=opus.lib
     # Rust's MSVC targets link the dynamic CRT, and a static library built against the
     # static one fails to link with the mismatch that costs everybody an afternoon.
     cmake_args+=(-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL)
-    if [ "$target" = "windows-x86_64-msvc" ]; then
-      # Same Coffee Lake floor as linux-x86_64. No flags of our own: on MSVC,
-      # PRESUME_AVX2 makes opus add `/arch:AVX2` globally (CMakeLists.txt:547-549),
-      # which is the whole of what cl.exe offers here — there is no `/arch:` level
-      # between AVX2 and AVX512, and no separate tuning flag.
-      simd_mode=presume
-      floor='x86-64-v3 / Coffee Lake (AVX2+FMA unconditional)'
-      cmake_args+=(-DOPUS_X86_PRESUME_SSE4_1=ON -DOPUS_X86_PRESUME_AVX2=ON)
-    fi
+    # Same Coffee Lake floor as linux-x86_64. No flags of our own: on MSVC, PRESUME_AVX2
+    # makes opus add `/arch:AVX2` globally (CMakeLists.txt:547-549), which is the whole of
+    # what cl.exe offers here — there is no `/arch:` level between AVX2 and AVX512, and no
+    # separate tuning flag.
+    floor='x86-64-v3 / Coffee Lake (AVX2+FMA unconditional)'
+    cmake_args+=(-DOPUS_X86_PRESUME_SSE4_1=ON -DOPUS_X86_PRESUME_AVX2=ON)
     ;;
   *)
     echo "unknown target: $target" >&2

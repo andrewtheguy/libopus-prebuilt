@@ -7,11 +7,12 @@ name: Release libopus archives
 # the same tests, run by the same code, and a failure anywhere in there means no release.
 #
 # Draft first, publish last, following remotex's release.yml. The property that buys:
-# **a draft release does not create the git tag.** Everything — six builds, their tests,
-# the e2e binaries, the CPU-floor comparison, packaging, upload — happens while the tag
-# still does not exist, and the tag appears only when the draft is published at the very
-# end. A failed release leaves a deletable draft rather than a tag pointing at archives
-# nobody should link.
+# **a draft release does not create the git tag.** Everything — four builds, their tests,
+# the e2e binaries, packaging, upload — happens while the tag still does not exist, and the
+# tag appears only when the draft is published at the very end. A cancelled or failed
+# release leaves a deletable draft rather than a tag pointing at archives nobody should
+# link, which is not theoretical: it is what let a release be abandoned mid-run for the
+# price of deleting a draft.
 #
 # The tag is *computed*, never typed: `v<opus>-<YYYYMMDD>-<short sha>`. The version says
 # what is inside, the date says when, and the hash says which commit — and because this
@@ -100,15 +101,16 @@ jobs:
             ${{ steps.tag.outputs.is_prerelease == 'true' && '--prerelease' || '' }}
 
   # Every target, built and tested by the same workflow the manual test loop uses. Not a
-  # copy of it — the same file.
-  ci:
+  # copy of it — the same file. Named for what it produces rather than "ci", which is a
+  # different workflow in this repository and would read as though this were running it.
+  archives:
     needs: prepare
     uses: ./.github/workflows/build.yml
     with:
       targets: all
 
   publish:
-    needs: [prepare, ci]
+    needs: [prepare, archives]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -136,8 +138,7 @@ jobs:
           # Named here rather than discovered, so that a target silently missing from the
           # matrix is a failed release instead of a release somebody links against six
           # months later and finds nothing for their platform.
-          expected="macos-arm64 linux-x86_64 linux-x86_64-baseline linux-aarch64
-                    windows-x86_64-msvc windows-x86_64-msvc-baseline"
+          expected="macos-arm64 linux-x86_64 linux-aarch64 windows-x86_64-msvc"
           for target in $expected; do
             dir="artifacts/libopus-$target"
             [ -f "$dir/MANIFEST" ] || {
@@ -157,15 +158,25 @@ jobs:
       - name: Collect the encoder digests
         run: |
           # Provenance for anyone keeping Opus fixtures: what each archive's encoder
-          # produced for a fixed input. The floors job already asserted that the two
-          # archives per platform agree; this records the values themselves, so a future
-          # release can be compared against this one without re-running anything.
+          # produced for a fixed input, recorded so that a future release can be compared
+          # against this one without re-running anything.
           {
             for dir in digests/digest-*; do
               echo "[${dir#digests/digest-}]"
               sed 's/^/  /' "$dir/digest.txt"
             done
           } | tee dist/ENCODER-DIGESTS
+
+          # Which archives agree, reported and not asserted. Measured at the time of
+          # writing: all x86_64 targets match each other across GCC and MSVC, and both
+          # aarch64 targets match across clang and GCC, while the two architectures differ —
+          # two sets of hand-written SIMD kernels doing float arithmetic. Fixtures are
+          # therefore valid per architecture, not per platform.
+          echo
+          echo "digest groups:"
+          for dir in digests/digest-*; do
+            printf '%s %s\n' "$(awk '$1=="digest"{print $2}' "$dir/digest.txt")" "${dir#digests/digest-}"
+          done | sort | awk '{ g[$1] = g[$1] " " $2 } END { for (d in g) print "  " d ":" g[d] }' 
 
       - name: Upload the assets to the draft
         env:
@@ -201,10 +212,12 @@ jobs:
           ## CPU floors
 
           The \`x86_64\` archives require **AVX2 (Coffee Lake or newer)** and call opus's
-          SSE4.1 and AVX2 kernels with the CPUID dispatch compiled out. For anything older —
-          including the Celeron and Pentium parts of that same generation, where AVX2 is
-          fused off — add \`features = ["x86-baseline"]\` to get the \`-baseline\` archive.
-          \`macos-arm64\` is built for \`apple-m1\`, which every arm64 Mac satisfies.
+          SSE4.1 and AVX2 kernels with the CPUID dispatch compiled out, so they execute an
+          illegal instruction on anything older — including the Celeron and Pentium parts of
+          that same generation, where AVX2 is fused off. That floor is deliberate and there
+          is no fallback archive; a project that needs one should build its own libopus and
+          point \`LIBOPUS_PREBUILT_DIR\` at it. \`macos-arm64\` is built for \`apple-m1\`,
+          which every arm64 Mac satisfies.
 
           \`SHA256SUMS\` covers every asset. \`ENCODER-DIGESTS\` records what each archive's
           encoder produced for a fixed input, for projects with checked-in Opus fixtures.

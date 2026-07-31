@@ -181,20 +181,15 @@ fn cache_root() -> PathBuf {
 /// The repo's target names are not Rust triples — they name *artifacts*, and there are
 /// more of them than triples, because x86_64 has two CPU floors.
 fn prebuilt_dir(target: &str) -> &'static str {
-    // Coffee Lake by default on x86_64, which is what the projects consuming this asked
-    // for. `x86-baseline` trades AVX2 for running on any x86_64 — which includes,
-    // unintuitively, the Celeron and Pentium parts *of* the Coffee Lake generation,
-    // where AVX2 is fused off.
-    let baseline = cfg!(feature = "x86-baseline");
+    // One archive per target. The x86_64 ones require AVX2 — Coffee Lake or newer, which is
+    // the floor the consuming projects specified — so there is deliberately no variant here
+    // for a CPU below it. Anything that old wants its own libopus, which is what
+    // LIBOPUS_PREBUILT_DIR is for.
     match target {
         "aarch64-apple-darwin" => "macos-arm64",
-        "x86_64-unknown-linux-gnu" | "x86_64-unknown-linux-musl" => {
-            if baseline { "linux-x86_64-baseline" } else { "linux-x86_64" }
-        }
+        "x86_64-unknown-linux-gnu" | "x86_64-unknown-linux-musl" => "linux-x86_64",
         "aarch64-unknown-linux-gnu" | "aarch64-unknown-linux-musl" => "linux-aarch64",
-        "x86_64-pc-windows-msvc" => {
-            if baseline { "windows-x86_64-msvc-baseline" } else { "windows-x86_64-msvc" }
-        }
+        "x86_64-pc-windows-msvc" => "windows-x86_64-msvc",
         "x86_64-apple-darwin" => panic!(
             "no prebuilt libopus for Intel macOS: the macOS artifact is arm64, tuned for \
              apple-m1. Set LIBOPUS_PREBUILT_DIR to a prefix holding your own libopus.a, \

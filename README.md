@@ -7,10 +7,11 @@ cmake at all — plus a Rust crate that replaces `opus` + `audiopus_sys` and lin
 |---|---|---|
 | `macos-arm64` | `libopus.a` | `apple-m1`, deployment target 11.0 |
 | `linux-x86_64` | `libopus.a` | **x86-64-v3 / Coffee Lake** — AVX2+FMA unconditional |
-| `linux-x86_64-baseline` | `libopus.a` | any x86_64 — SSE2, SIMD chosen by CPUID |
 | `linux-aarch64` | `libopus.a` | ARMv8-A, NEON unconditional |
 | `windows-x86_64-msvc` | `opus.lib` | **`/arch:AVX2` / Coffee Lake**, dynamic CRT |
-| `windows-x86_64-msvc-baseline` | `opus.lib` | any x86_64, dynamic CRT |
+
+Every one of them compiles out opus's runtime CPU dispatch and calls the SIMD kernels
+unconditionally, because every one names a floor that guarantees them.
 
 ## Using it from Rust
 
@@ -35,7 +36,7 @@ Two crates are involved:
 |---|---|
 | `libopus-prebuilt-sys` | the FFI, and a build script that finds the right archive and emits two link flags |
 | `opus-prebuilt` | `opus` 0.3.1, verbatim, with its `extern crate audiopus_sys` line pointing at the above |
-| `opus-e2e` | not a library: a consumer, written with the same dependency line you would use, built and *run* by the pipeline on all six targets |
+| `opus-e2e` | not a library: a consumer, written with the same dependency line you would use, built and *run* by the pipeline on all four targets |
 
 Keeping the safe wrapper byte-identical to upstream is deliberate: the consuming projects
 are written against *its* semantics, and this repository should have no opinion about
@@ -45,16 +46,15 @@ line again.
 ### CPU floors
 
 The x86_64 archives assume **Coffee Lake or newer** and call opus's SSE4.1 and AVX2
-kernels unconditionally, with the runtime CPUID dispatch compiled out. Stated plainly,
-the cost is that they execute an illegal instruction on anything without AVX2: pre-2013
-Intel, pre-Zen AMD, and — the one that surprises people — the Celeron and Pentium parts
-*of* the Coffee Lake generation, where AVX2 is fused off. For those:
+kernels unconditionally, with the runtime CPUID dispatch compiled out. Stated plainly, the
+cost is that they execute an illegal instruction on anything without AVX2: pre-2013 Intel,
+pre-Zen AMD, and — the one that surprises people — the Celeron and Pentium parts *of* the
+Coffee Lake generation, where AVX2 is fused off.
 
-```toml
-opus = { package = "opus-prebuilt", git = "…", tag = "…", features = ["x86-baseline"] }
-```
-
-which links the archive that keeps the dispatch and runs on any x86_64.
+That is the floor this repository was asked for, and there is deliberately no fallback
+archive for anything below it. A dispatching build would be a second artifact to build,
+test, release and reason about in order to serve machines nobody here targets; a project
+that needs one should build its own libopus and point `LIBOPUS_PREBUILT_DIR` at it.
 
 macOS needs no such choice. Every arm64 Mac is an M1 or later, so naming the M1 as the
 floor costs no compatibility at all and buys ARMv8.4 with dotprod and fp16 over the
@@ -175,10 +175,10 @@ wrapper — that is upstream's code, covered by upstream's tests — but underne
   works, which nothing else here can check. It exercises 48/16/8 kHz and mono/stereo,
   which is what moves libopus between its SILK, CELT and hybrid paths, and those paths are
   where the hand-written SIMD kernels live.
-- `opus-e2e --digest` fingerprints what the *encoder produced*, and the pipeline's `floors`
-  job asserts that the two archives differing only in CPU floor emit byte-identical
-  packets. That is the question behind "will my fixtures still match" — see **Bumping
-  opus** — and it is checked on every run rather than reasoned about once.
+- `opus-e2e --digest` fingerprints what the *encoder produced*, and every release publishes
+  those fingerprints as `ENCODER-DIGESTS`. That is the question behind "will my fixtures
+  still match" — see **Bumping opus** — recorded per release so a future one can be compared
+  against it without re-running anything.
 - `./check-static.sh <binary>` then asks the question the name of this repository implies:
   is libopus *in* the binary (its version string is), and is there a dynamic dependency on
   one as well or instead (there must not be). That second one passes every test on the
@@ -201,7 +201,7 @@ before it is unpacked** (`source.sh`), so bytes that are not the pinned release 
 reach a compiler. Output lands in `dist/<target>/` with a `MANIFEST` recording the
 version, the checksum, the CPU floor, the flags and the SIMD evidence.
 
-**Linux**, including both x86_64 floors, is tested in Docker:
+**Linux** is tested in Docker:
 
 ```sh
 ./test-docker.sh              # every Linux target this machine can run
@@ -228,12 +228,12 @@ then builds and runs `opus-e2e` on the runner — which is the only place `opus_
 
 | workflow | trigger | what it does |
 |---|---|---|
-| `ci.yml` | every push and PR | shellcheck; parses every script under macOS's stock **bash 3.2**; builds and tests the x86_64 pair by *calling* `build.yml`; and builds as a consumer does, with an empty `prebuilt/`, to exercise the download-and-verify path nothing else takes |
-| `build.yml` | manual, or called | the six-target matrix: build, test, e2e binary, `check-static.sh`, CPU-floor comparison. Cannot publish — its token is read-only |
-| `release.yml` | manual | calls `build.yml` for all six, then packages, uploads and publishes |
+| `ci.yml` | every push and PR | shellcheck; parses every script under macOS's stock **bash 3.2**; builds and tests `linux-x86_64` by *calling* `build.yml`; and builds as a consumer does, with an empty `prebuilt/`, to exercise the download-and-verify path nothing else takes |
+| `build.yml` | manual, or called | the four-target matrix: build, test, e2e binary, `check-static.sh`. Cannot publish — its token is read-only |
+| `release.yml` | manual | calls `build.yml` for all four, then packages, uploads and publishes draft-first |
 
 The split is about what changes commit to commit. The archives change only when `opus.env`
-or `build.sh` does, so rebuilding six of them on every push would be six runners proving a
+or `build.sh` does, so rebuilding four of them on every push would be four runners proving a
 pinned tarball is still pinned. The crates and the scripts change constantly — and for a
 while nothing checked them unless somebody remembered to press a button, which is how a
 bash 3.2 incompatibility reached a commit.
@@ -272,15 +272,14 @@ typing tags. Releasing twice from one commit on one day is refused, because it w
 same tag.
 
 The order is draft first, publish last, and the reason is worth knowing: **a draft release
-does not create the git tag.** Six builds, their tests, the e2e binaries, the CPU-floor
-comparison, packaging and upload all happen while the tag still does not exist, and it
+does not create the git tag.** Four builds, their tests, the e2e binaries, packaging and upload all happen while the tag still does not exist, and it
 comes into being only when the draft is published as the final step. A release that fails
 half way leaves a draft somebody can delete rather than a tag pointing at archives nobody
 should link. A run from any branch but the default one is marked pre-release.
 
-Assets are the six archives, `SHA256SUMS` over all of them, and `ENCODER-DIGESTS` — what
+Assets are the four archives, `SHA256SUMS` over all of them, and `ENCODER-DIGESTS` — what
 each archive's encoder produced for a fixed input, for projects with pinned Opus fixtures.
-The release refuses to publish if any of the six is missing, because a release short an
+The release refuses to publish if any of the four is missing, because a release short an
 archive is discovered later, by somebody else, on the platform nobody tested.
 
 `--pin` reads the release's own `SHA256SUMS`, so it runs after the release exists; that is
@@ -301,38 +300,18 @@ stable, and 1.6.1 was verified against a consumer whose checked-in Opus fixtures
 generated by the 1.3-era vendored copy — they still matched byte for byte. That is a good
 sign, not a guarantee; a project with pinned fixtures should re-run its own encoder tests.
 
-The *floor* is a different question, and it is answered rather than guessed. `opus-e2e
---digest` encodes a fixed input under pinned settings — CBR, fixed complexity, no FEC or
-DTX — and the `floors` job compares the digest from the Coffee Lake archive against the
-baseline one, same runner and same compiler. They are byte-identical today, on Linux and
-on Windows, so switching to the AVX2 floor does not invalidate anybody's fixtures. If a
-future bump ever changes that, the pipeline fails and says so, because the alternative is
-a consumer discovering it from a diff in their own test suite.
+Fixtures are valid **per architecture**, not per platform. Measured across the four
+targets: all x86_64 archives produce identical encoder output — GCC on Linux and MSVC on
+Windows agree byte for byte — as do both aarch64 archives across clang and GCC, while the
+two architectures differ from each other, which is what two sets of hand-written SIMD
+kernels doing float arithmetic will do. Nothing here introduced that; it is equally true of
+the `audiopus_sys` build. Every release records the values as `ENCODER-DIGESTS`, so the
+comparison after a bump costs nothing.
 
-The digests across all six targets say something more precise than "it depends on the
-platform", and it is worth knowing if you keep Opus fixtures anywhere:
-
-| targets | digest |
-|---|---|
-| `linux-x86_64`, `linux-x86_64-baseline`, and both `windows-x86_64-msvc` | `4359525edd8e721b` |
-| `linux-aarch64`, `macos-arm64` | `31c60ddd44f907ed` |
-
-So the encoder's output is stable **within** an architecture and varies **across** one.
-GCC on Linux and MSVC on Windows agree byte for byte; so do clang-on-macOS and
-GCC-on-Linux for arm64. What differs is x86_64 against aarch64, which is what you would
-expect from two sets of hand-written SIMD kernels doing float arithmetic — and it is
-equally true of the `audiopus_sys` build. Practically: fixtures generated on one
-architecture are valid on that architecture regardless of OS or compiler, and are not
-valid on the other.
-
-Only the floor pairs are *asserted*, because only they are a controlled comparison — same
-runner, same compiler, one variable. The grouping above is reported rather than enforced,
-since a runner image changing its compiler is a fact to notice, not a build to fail.
-
-One caveat about measuring this yourself: a digest taken under emulation is not the
-hardware answer. `./test-docker.sh` on Apple silicon runs x86_64 under QEMU, whose FMA
-rounding is not bit-accurate, and it produces a third value that no real machine does.
-Trust the pipeline's numbers over a local emulated one.
+One caveat about measuring it yourself: a digest taken under emulation is not the hardware
+answer. `./test-docker.sh` on Apple silicon runs x86_64 under QEMU, whose FMA rounding is
+not bit-accurate, and it produces a value no real machine does. Trust the pipeline's
+numbers over a local emulated one.
 
 ## Licensing
 

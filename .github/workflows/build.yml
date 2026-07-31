@@ -11,7 +11,7 @@ name: Build libopus
 # archive gets exercised at all.
 #
 # `workflow_call` is release.yml. A failure anywhere in here — a build, a test, the e2e
-# binary, the CPU-floor comparison — fails the caller's job and the release never happens.
+# binary, `check-static.sh` — fails the caller's job and the release never happens.
 on:
   workflow_dispatch:
     inputs:
@@ -41,27 +41,22 @@ jobs:
       - uses: actions/checkout@v5
 
       # That the committed headers are the pinned opus's, and that src/consts.rs is what
-      # those headers say. Cheap, and it runs before six compilers do.
+      # those headers say. Cheap, and it runs before four compilers do.
       - run: ./sync-prebuilt.sh --check
 
       # The matrix, narrowed here as *data* rather than by a job-level `if`. Two reasons,
       # one hard and one practical: a job-level condition cannot reference `matrix` at all
       # — GitHub rejects the workflow outright — and filtering before the fan-out means a
-      # `targets: windows` dispatch starts two runners instead of six.
-      #
-      # `features` is spelled out even where it is empty, so `${{ matrix.features }}` is
-      # always a defined key rather than a silent blank.
+      # `targets: windows` dispatch starts one runner instead of four.
       - id: matrix
         env:
           GROUP: ${{ inputs.targets || 'all' }}
         run: |
           all='[
-            {"target":"macos-arm64",                 "runs-on":"macos-latest",   "group":"arm64",   "features":""},
-            {"target":"linux-x86_64",                "runs-on":"ubuntu-24.04",   "group":"x86_64",  "features":""},
-            {"target":"linux-x86_64-baseline",       "runs-on":"ubuntu-24.04",   "group":"x86_64",  "features":"--features opus-prebuilt/x86-baseline"},
-            {"target":"linux-aarch64",               "runs-on":"ubuntu-24.04-arm","group":"arm64",  "features":""},
-            {"target":"windows-x86_64-msvc",         "runs-on":"windows-latest", "group":"windows", "features":""},
-            {"target":"windows-x86_64-msvc-baseline","runs-on":"windows-latest", "group":"windows", "features":"--features opus-prebuilt/x86-baseline"}
+            {"target":"macos-arm64",         "runs-on":"macos-latest",    "group":"arm64"},
+            {"target":"linux-x86_64",        "runs-on":"ubuntu-24.04",    "group":"x86_64"},
+            {"target":"linux-aarch64",       "runs-on":"ubuntu-24.04-arm","group":"arm64"},
+            {"target":"windows-x86_64-msvc", "runs-on":"windows-latest",  "group":"windows"}
           ]'
           targets="$(jq -c --arg g "$GROUP" '[.[] | select($g == "all" or .group == $g)]' <<<"$all")"
           echo "$targets" | jq -r '.[].target' | sed 's/^/  /'
@@ -71,7 +66,7 @@ jobs:
     needs: plan
     strategy:
       # No fail-fast: one target failing to configure is exactly the case where the other
-      # five logs are the useful comparison.
+      # three logs are the useful comparison.
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.plan.outputs.targets) }}
@@ -94,7 +89,7 @@ jobs:
         shell: bash
         run: |
           ./sync-prebuilt.sh
-          cargo test --offline --workspace ${{ matrix.features }}
+          cargo test --offline --workspace
 
       # The end-to-end leg: a release binary that is a *consumer* of the crate, executed
       # on the runner's own processor. This is where the CPU floor stops being a claim in a
@@ -103,13 +98,14 @@ jobs:
       - name: End to end — encode and decode in a real binary
         shell: bash
         run: |
-          cargo build --offline --release --workspace ${{ matrix.features }}
+          cargo build --offline --release --workspace
           bin=target/release/opus-e2e
           [ -f "$bin" ] || bin="$bin.exe"
           "$bin"
           ./check-static.sh "$bin"
-          # A fingerprint of the encoder's *output*, compared across CPU floors by the
-          # `floors` job below.
+          # A fingerprint of the encoder's *output*, published with the release as
+          # ENCODER-DIGESTS so that a project with pinned Opus fixtures can tell whether a
+          # future release would change them.
           mkdir -p digest
           "$bin" --digest | tee "digest/digest.txt"
 
@@ -128,76 +124,3 @@ jobs:
           name: libopus-${{ matrix.target }}
           path: dist/${{ matrix.target }}
           if-no-files-found: error
-
-  # Does raising the x86_64 floor change what the encoder *emits*?
-  #
-  # It is a fair question and it has a real consequence: a project with checked-in Opus
-  # fixtures needs to know whether its fixtures still match after the switch, and
-  # "probably, opus is stable" is not something anybody can act on. So the two archives
-  # that differ *only* in CPU floor encode the same input under pinned settings, and their
-  # digests are compared. Measured answer, at the time of writing: identical.
-  #
-  # It is an assertion rather than a printout because of what a future divergence would
-  # mean. If an opus bump or a flag change ever makes the floors disagree, whoever made
-  # that change has to tell consumers to re-run their encoder tests — and a line in a log
-  # nobody reads is not how that gets communicated.
-  floors:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: digest-*
-          path: digests
-
-      - name: Compare the CPU floors
-        run: |
-          shopt -s nullglob
-          for dir in digests/digest-*; do
-            echo "== ${dir#digests/digest-}"
-            sed 's/^/   /' "$dir/digest.txt"
-          done
-
-          status=0
-          compared=0
-          # Same OS, same architecture, same compiler — only the floor differs. Comparing
-          # across architectures would be a different and much weaker claim, since libopus
-          # does not promise identical float output between, say, NEON and AVX2.
-          for pair in "linux-x86_64 linux-x86_64-baseline" \
-                      "windows-x86_64-msvc windows-x86_64-msvc-baseline"; do
-            set -- $pair
-            a="digests/digest-$1/digest.txt"
-            b="digests/digest-$2/digest.txt"
-            # A narrowed dispatch (`targets: arm64`) legitimately has no pair to compare.
-            if [ ! -f "$a" ] || [ ! -f "$b" ]; then
-              echo "-- skipped $1 vs $2: not both built in this run"
-              continue
-            fi
-            compared=$((compared + 1))
-            da="$(awk '$1=="digest"{print $2}' "$a")"
-            db="$(awk '$1=="digest"{print $2}' "$b")"
-            if [ "$da" = "$db" ]; then
-              echo "ok   $1 and $2 encode byte-identically ($da)"
-            else
-              echo "DIFF $1=$da  $2=$db"
-              echo "     Raising the CPU floor changed the encoder's output. This is not"
-              echo "     necessarily a bug, but every consumer with pinned Opus fixtures"
-              echo "     has to re-generate them, and the README has to say so." >&2
-              status=1
-            fi
-          done
-          # Reported, not asserted: which targets happen to agree. Measured today, the
-          # encoder is stable within an architecture across OS and compiler — GCC on Linux
-          # and MSVC on Windows produce the same bytes — and differs between x86_64 and
-          # aarch64, which is two sets of hand-written SIMD kernels doing float arithmetic.
-          # That is a fact consumers with pinned fixtures need, but a runner image changing
-          # its compiler is something to notice rather than something to fail a build on.
-          echo
-          echo "digest groups (informational):"
-          for dir in digests/digest-*; do
-            printf '%s %s\n' "$(awk '$1=="digest"{print $2}' "$dir/digest.txt")" "${dir#digests/digest-}"
-          done | sort | awk '{ g[$1] = g[$1] " " $2 } END { for (d in g) print "  " d ":" g[d] }'
-
-          echo
-          echo "$compared floor pair(s) compared"
-          exit $status

@@ -40,8 +40,7 @@ sums="$crate/prebuilt.sums"
 
 # Every target build.sh knows how to make. `--pin` warns about any that a release is
 # missing, because the failure otherwise lands on whoever first builds for that target.
-targets=(macos-arm64 linux-x86_64 linux-x86_64-baseline linux-aarch64
-         windows-x86_64-msvc windows-x86_64-msvc-baseline)
+targets=(macos-arm64 linux-x86_64 linux-aarch64 windows-x86_64-msvc)
 
 asset_url() { echo "https://github.com/$PREBUILT_REPO/releases/download/$1/$2"; }
 
