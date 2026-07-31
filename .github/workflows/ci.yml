@@ -1,0 +1,106 @@
+name: CI
+
+# On every push and pull request, unlike build.yml and release.yml, which are manual.
+#
+# The distinction is what changes commit to commit. The *archives* change only when
+# opus.env or build.sh does — a deliberate act, followed by a deliberate `build.yml` run —
+# so rebuilding six of them on every push would be six runners proving that a pinned
+# tarball is still pinned. The *Rust crates and the shell scripts* change constantly, and
+# until now nothing checked them unless somebody remembered to press a button; a bash 3.2
+# incompatibility in build.sh reached a commit for exactly that reason.
+#
+# So: one x86_64 pair rather than all six targets, plus the two checks that need no
+# compiler, plus the one path a normal build here never takes.
+on:
+  push:
+    # Documentation cannot break a build, and a README-only commit should not spend a
+    # runner proving it.
+    paths-ignore: ["**.md"]
+  pull_request:
+    paths-ignore: ["**.md"]
+
+permissions:
+  contents: read
+
+jobs:
+  scripts:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: shellcheck
+        # `-x` so that `. ./opus.env` and `. ./source.sh` are followed rather than reported
+        # as unresolvable.
+        run: |
+          shellcheck -x build.sh sync-prebuilt.sh test-docker.sh check-static.sh \
+                        crates/libopus-prebuilt-sys/gen-consts.sh
+
+  # A separate job on macOS for one reason: its `/bin/bash` is 3.2, from 2007, and that is
+  # what a stock Mac runs. shellcheck accepts bash-5-only constructs happily, and
+  # `$(case … esac)` — legal in bash 4+, a syntax error in 3.2 — is how build.sh broke on
+  # the macOS runner while passing on every other target and on a Mac with Homebrew's bash
+  # earlier in PATH. Parsing is enough to catch that class of bug, and it costs seconds.
+  stock-bash:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Parse every script with the bash a stock Mac ships
+        run: |
+          /bin/bash --version | head -1
+          /bin/bash -n build.sh source.sh sync-prebuilt.sh test-docker.sh check-static.sh \
+                       crates/libopus-prebuilt-sys/gen-consts.sh
+          echo "every script parses under bash $(/bin/bash -c 'echo $BASH_VERSION')"
+
+  # The real gate: build an archive, link the crates against it, run the tests and the
+  # end-to-end binary. `targets: x86_64` is the pair that differs only in CPU floor, so the
+  # floor comparison runs too — and x86_64 rather than arm64 because it is the group where a
+  # wrong answer is an illegal instruction rather than a slower library.
+  #
+  # Calling build.yml rather than repeating it means CI, the manual test loop and the
+  # release all exercise the same code, with no CI-only build to drift.
+  build:
+    uses: ./.github/workflows/build.yml
+    with:
+      targets: x86_64
+
+  # The one path nothing else takes. Every other job populates `prebuilt/` from a local
+  # build first, which means build.rs's third resolution step — download the release asset,
+  # verify it against the checksum in prebuilt.sums, unpack it — is what every *consumer's*
+  # first build does and the one thing building here never exercises. This job leaves
+  # prebuilt/ empty on purpose and lets it fetch.
+  consumer-fetch:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Is a release pinned yet?
+        id: pinned
+        run: |
+          if grep -q '^release ' crates/libopus-prebuilt-sys/prebuilt.sums; then
+            echo "yes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "yes=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::prebuilt.sums names no release yet, so there is nothing to fetch."
+          fi
+
+      - name: Build as a consumer does, with nothing prebuilt locally
+        if: steps.pinned.outputs.yes == 'true'
+        run: |
+          # No ./build.sh and no ./sync-prebuilt.sh. This is a clone with an empty
+          # prebuilt/, which is the state every consuming project is in.
+          cargo build -vv --release 2>&1 | tee build.log | tail -5
+          grep -oE 'cargo:info=libopus.*' build.log | sort -u
+
+          # Which source satisfied the link, asserted rather than assumed: if a stray
+          # archive or a system libopus had satisfied it, this job would pass while testing
+          # nothing at all.
+          grep -q 'linked statically from release asset' build.log || {
+            echo "::error::the archive did not come from the pinned release"
+            exit 1
+          }
+
+      - name: Test and run the binary it fetched
+        if: steps.pinned.outputs.yes == 'true'
+        run: |
+          cargo test --workspace --release
+          ./target/release/opus-e2e
+          ./check-static.sh target/release/opus-e2e
