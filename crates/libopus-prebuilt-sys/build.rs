@@ -15,17 +15,30 @@
 // (3) is what makes a fresh clone of a consuming project build with nothing installed;
 // (1) is what makes it work with no network at all.
 //
-// No checksum file, deliberately. The checksum worth having is the *third-party* one:
-// opus.env pins the SHA-256 of Xiph's source tarball and build.sh refuses to unpack
-// anything else, because that is the supply chain this repository does not control.
-// Hashing our own release assets on the way back out meant a file that had to be
-// regenerated and committed after every release, restating what GitHub already publishes
-// as a digest beside each asset and serves over TLS.
+// Two things get hashed on the way in, and neither hash is committed to this repository:
 //
-// `releases/latest/download/…` rather than a pinned tag, for the same reason: a tag written
-// in here is a tag that has to be updated in here. The asset name carries the opus version,
-// so a release of a *different* version cannot satisfy the URL — it 404s naming the version
-// rather than quietly returning the wrong library.
+//   - the downloaded `.tar.gz`, against the `SHA256SUMS` asset the release job generates
+//     from the archives it just built and publishes beside them;
+//   - the extracted `.a`/`.lib`, against the `sha256(library)` line in the MANIFEST inside
+//     the archive — on every resolution path, not just the download.
+//
+// Both are **corruption** checks, not tamper checks: each list travels with the files it
+// covers, so whoever could replace one could replace both. They earn their place because
+// corruption is what actually happens — a truncated download, a cache half-written by a
+// killed build, an `.a` overwritten by hand — and each of those otherwise surfaces as a
+// page of undefined symbols rather than one sentence naming the file.
+//
+// The checksum that constrains somebody *other than us* is the third-party one: opus.env
+// pins the SHA-256 of Xiph's source tarball and build.sh refuses to unpack anything else,
+// because that is the supply chain this repository does not control. It is also the only
+// one kept by hand — a checked-in file of our own release hashes would have to be
+// regenerated and committed after every release, which is exactly the maintenance that
+// generating SHA256SUMS at release time avoids.
+//
+// `releases/latest/download/…` rather than a pinned tag: a tag written in here is a tag
+// that has to be updated in here. The asset name carries the opus version, so a release of
+// a *different* version cannot satisfy the URL — it 404s naming the version rather than
+// quietly returning the wrong library.
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -46,6 +59,7 @@ fn main() {
          prefix *containing* lib/, not the lib/ directory itself.",
         lib_dir.display(),
     );
+    verify_library(&prefix, &lib_dir.join(archive), &provenance);
 
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     println!("cargo:rustc-link-lib=static=opus");
@@ -71,6 +85,125 @@ fn main() {
         // checked its version, its CPU floor, or that it has any SIMD in it.
         println!("cargo:warning=libopus from LIBOPUS_PREBUILT_DIR ({}) — unverified", prefix.display());
     }
+}
+
+/// Hash the archive on disk and require it to be what its own MANIFEST says was built.
+///
+/// Runs on every resolution path, not just the download: the cache is the copy most likely
+/// to be wrong, because it survives across builds and nothing else ever looks at it again.
+/// Hashing a megabyte costs about a millisecond and turns a corrupt file into a sentence
+/// instead of a page of undefined symbols.
+fn verify_library(prefix: &Path, library: &Path, provenance: &str) {
+    let text = match std::fs::read_to_string(prefix.join("MANIFEST")) {
+        Ok(text) => text,
+        // A prefix from outside this repository is the only one allowed to arrive without
+        // a MANIFEST, and main() already warns that nothing about it has been checked.
+        Err(_) if provenance == "LIBOPUS_PREBUILT_DIR" => return,
+        Err(e) => panic!(
+            "no readable MANIFEST in {} (from {provenance}): {e}\n\nEvery archive this \
+             repository publishes carries one.",
+            prefix.display(),
+        ),
+    };
+    let expected = text
+        .lines()
+        .find_map(|line| line.strip_prefix("sha256(library) "))
+        .unwrap_or_else(|| {
+            panic!("no sha256(library) line in the MANIFEST at {}", prefix.display())
+        })
+        .trim();
+
+    let bytes = std::fs::read(library)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", library.display()));
+    let actual = sha256_hex(&bytes);
+    // A hand-written panic rather than assert_eq!, whose own "left: … right: …" tail would
+    // repeat both hashes underneath a message that already lays them out readably.
+    if actual != expected {
+        panic!(
+            "\n\n{} does not match the MANIFEST beside it (from {provenance}).\n\
+             \x20 MANIFEST says {expected}\n\
+             \x20 the file is  {actual}\n\n\
+             The archive is corrupt or was modified after it was built. Delete the \
+             directory above and build again.\n",
+            library.display(),
+        );
+    }
+    println!("cargo:info=libopus sha256(library) {actual} matches the MANIFEST");
+}
+
+/// SHA-256 (FIPS 180-4), by hand.
+///
+/// The alternatives are a crate — which every consumer would then compile, in a `-sys`
+/// crate whose entire selling point is that it builds nothing — or shelling out to a
+/// different tool per platform (`shasum`, `sha256sum`, `certutil`), none of which is
+/// guaranteed to exist wherever cargo does. Fifty lines with a test vector beats both.
+fn sha256_hex(bytes: &[u8]) -> String {
+    #[rustfmt::skip]
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    ];
+    let mut h: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    ];
+
+    // Pad to a multiple of 64 bytes: a 1 bit, zeros, then the length in bits, big-endian.
+    let mut msg = Vec::with_capacity(bytes.len() + 72);
+    msg.extend_from_slice(bytes);
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&(bytes.len() as u64 * 8).to_be_bytes());
+
+    for block in msg.chunks_exact(64) {
+        let mut w = [0u32; 64];
+        for (word, src) in w.iter_mut().zip(block.chunks_exact(4)) {
+            *word = u32::from_be_bytes([src[0], src[1], src[2], src[3]]);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
+        }
+
+        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = h;
+        for i in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ (!e & g);
+            let t1 = hh
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(K[i])
+                .wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let t2 = s0.wrapping_add(maj);
+            hh = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(t1);
+            d = c;
+            c = b;
+            b = a;
+            a = t1.wrapping_add(t2);
+        }
+        for (slot, add) in h.iter_mut().zip([a, b, c, d, e, f, g, hh]) {
+            *slot = slot.wrapping_add(add);
+        }
+    }
+
+    h.iter().map(|word| format!("{word:08x}")).collect()
 }
 
 fn resolve(manifest: &Path, target: &str, version: &str) -> (PathBuf, String) {
@@ -102,7 +235,7 @@ fn fetch(manifest: &Path, name: &str, version: &str, cached: &Path) -> PathBuf {
 
     let repo = opus_env(manifest, "PREBUILT_REPO");
     let asset = format!("libopus-{version}-{name}.tar.gz");
-    let url = format!("https://github.com/{repo}/releases/latest/download/{asset}");
+    let base = format!("https://github.com/{repo}/releases/latest/download");
 
     // Staged under a pid-suffixed name so two cargo builds racing here cannot read each
     // other's half-written tarball. The loser of the race throws its copy away below.
@@ -110,19 +243,30 @@ fn fetch(manifest: &Path, name: &str, version: &str, cached: &Path) -> PathBuf {
     let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging).expect("cannot create the cache directory");
     let tarball = staging.join(&asset);
+    let sums = staging.join("SHA256SUMS");
 
-    println!("cargo:info=fetching {url}");
-    run(Command::new("curl").args([
-        "-sSL", "--fail", "--max-time", "300", "--retry", "3", "-o",
-        tarball.to_str().unwrap(), &url,
-    ]));
+    println!("cargo:info=fetching {base}/{asset}");
+    if !curl(&format!("{base}/{asset}"), &tarball) {
+        panic!("cannot download {base}/{asset}");
+    }
+    // Both URLs resolve `latest` independently, so a release published between these two
+    // requests would give a mismatch below rather than a wrong library — which is the
+    // right way round for a race this unlikely.
+    if !curl(&format!("{base}/SHA256SUMS"), &sums) {
+        panic!(
+            "cannot download {base}/SHA256SUMS\n\nEvery release publishes one beside the \
+             archives. If the latest release predates that, upgrade this crate or set \
+             LIBOPUS_PREBUILT_DIR to a prefix you built yourself."
+        );
+    }
+    verify_download(&sums, &asset, &tarball);
 
     // `tar` rather than a Rust tar crate: it is present on macOS, on every Linux image that
     // can run cargo, and in System32 on Windows 10 1803 and later, and a build dependency
-    // here would be one every consumer compiles. It is also the integrity check that
-    // remains — a truncated or corrupt download does not extract.
+    // here would be one every consumer compiles.
     run(Command::new("tar").arg("xzf").arg(&tarball).arg("-C").arg(&staging));
     std::fs::remove_file(&tarball).ok();
+    std::fs::remove_file(&sums).ok();
 
     std::fs::create_dir_all(cached.parent().unwrap()).ok();
     if std::fs::rename(&staging, cached).is_err() {
@@ -131,6 +275,54 @@ fn fetch(manifest: &Path, name: &str, version: &str, cached: &Path) -> PathBuf {
         let _ = std::fs::remove_dir_all(&staging);
     }
     cached.to_path_buf()
+}
+
+/// The downloaded tarball against the SHA256SUMS published beside it on the same release.
+///
+/// Same standing as the MANIFEST check and for the same reason — the list travels with the
+/// files it covers — so this catches a truncated or mangled download, not a dishonest
+/// release. It replaces relying on `tar` to notice: gzip's CRC does catch corruption, but
+/// it reports it as "unexpected end of file" from a program the user did not know was
+/// running, which is a worse sentence than this one.
+fn verify_download(sums: &Path, asset: &str, tarball: &Path) {
+    let text = std::fs::read_to_string(sums).expect("cannot read the downloaded SHA256SUMS");
+    // coreutils writes `<hex>  <name>`, and `sha256sum ./*.tar.gz` would prefix the name
+    // with `./` — accepted here so that how the release job spelled its glob cannot break
+    // every consumer's build.
+    let expected = text
+        .lines()
+        .find_map(|line| {
+            let (hash, rest) = line.split_once(char::is_whitespace)?;
+            (rest.trim().trim_start_matches("./") == asset).then_some(hash)
+        })
+        .unwrap_or_else(|| {
+            panic!("SHA256SUMS on the latest release does not list {asset}:\n{text}")
+        });
+
+    let bytes = std::fs::read(tarball).expect("cannot read the downloaded archive");
+    let actual = sha256_hex(&bytes);
+    if actual != expected {
+        panic!(
+            "\n\n{asset} does not match the SHA256SUMS published beside it.\n\
+             \x20 SHA256SUMS says {expected}\n\
+             \x20 the download is {actual}\n\n\
+             The download is corrupt, or a release was published while it was in flight. \
+             Try again.\n"
+        );
+    }
+    println!("cargo:info=libopus {asset} matches SHA256SUMS ({actual})");
+}
+
+/// `curl` one URL into one file, reporting whether it worked rather than dying, so that
+/// each caller can say what a failure means.
+fn curl(url: &str, out: &Path) -> bool {
+    Command::new("curl")
+        .args(["-sSL", "--fail", "--max-time", "300", "--retry", "3", "-o"])
+        .arg(out)
+        .arg(url)
+        .status()
+        .unwrap_or_else(|e| panic!("cannot run curl: {e}"))
+        .success()
 }
 
 fn run(cmd: &mut Command) {
