@@ -179,6 +179,19 @@ jobs:
               status=1
             fi
           done
+          # Reported, not asserted: which targets happen to agree. Measured today, the
+          # encoder is stable within an architecture across OS and compiler — GCC on Linux
+          # and MSVC on Windows produce the same bytes — and differs between x86_64 and
+          # aarch64, which is two sets of hand-written SIMD kernels doing float arithmetic.
+          # That is a fact consumers with pinned fixtures need, but a runner image changing
+          # its compiler is something to notice rather than something to fail a build on.
+          echo
+          echo "digest groups (informational):"
+          for dir in digests/digest-*; do
+            printf '%s %s\n' "$(awk '$1=="digest"{print $2}' "$dir/digest.txt")" "${dir#digests/digest-}"
+          done | sort | awk '{ g[$1] = g[$1] " " $2 } END { for (d in g) print "  " d ":" g[d] }'
+
+          echo
           echo "$compared floor pair(s) compared"
           exit $status
 
