@@ -195,6 +195,36 @@ wrapper — that is upstream's code, covered by upstream's tests — but underne
   build machine and fails on a slim runtime image, which is the exact failure this repo
   exists to remove.
 
+### Leaks
+
+Granting that upstream libopus does not leak, the only way this layer can is a `*_create`
+with no matching destroy. That set is small and closed — five allocating entry points in
+the FFI, five `Drop` impls — so the checks are about keeping the pairing intact:
+
+| where | tool | covers |
+|---|---|---|
+| `opus-e2e`, every target | RSS after 12,000 create/drop cycles | Windows, which has neither of the below |
+| `./test-docker.sh` | `valgrind --leak-check=full` | Linux, exactly, including leaks inside libopus |
+| CI `leaks` job | `leaks --atExit` | macOS |
+
+**Each one is paired with a control that leaks on purpose, and the control going unnoticed
+is itself a failing check.** That is not ceremony. libopus allocates with C `malloc`, so
+the obvious Rust approach — a counting `GlobalAlloc` — sees nothing it does and would
+report a clean run however badly the handles leaked. A leak checker that cannot see the
+allocations is indistinguishable from one that found none, and the only way to tell them
+apart is to hand it something that definitely leaks. `opus-e2e --leak-only` exists for
+exactly that and has no other purpose.
+
+Measured separation, so the thresholds are not guesses: leaking 1200 handles moves RSS by
+about 30 MB on both macOS and Linux, while 12,000 created and dropped move it by 48 KB and
+0 KB respectively. The check trips at 4 MB, roughly a hundred times the honest noise and a
+seventh of the smallest real leak.
+
+`OPUS_E2E_MEMORY=off` skips the RSS section, and both external tools set it — partly
+because twelve thousand encoder states under valgrind is unbearably slow, and partly
+because that section's own control would otherwise show up as 31 MB of leaked memory in
+their reports, which is true and also entirely deliberate.
+
 ## Building and testing locally
 
 ```sh
