@@ -14,6 +14,12 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$here"
+# The `cd` above makes this correct at run time from anywhere. `source-path=SCRIPTDIR` is
+# what makes it resolvable at *check* time too, since shellcheck would otherwise look for
+# ../../opus.env relative to wherever it was invoked — which is the repository root in CI,
+# two levels up from where this script means.
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=../../opus.env
 . ../../opus.env
 
 out=src/consts.rs
