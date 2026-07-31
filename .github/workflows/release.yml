@@ -116,19 +116,12 @@ jobs:
       - uses: actions/checkout@v5
 
       # No `merge-multiple`: each target's artifact is a *tree* (lib/, include/, MANIFEST)
-      # and they must stay in separate directories to be packaged separately. The pattern
-      # also leaves the digest-* artifacts alone, which are collected below.
+      # and they must stay in separate directories to be packaged separately.
       - name: Download the archives
         uses: actions/download-artifact@v4
         with:
           pattern: libopus-*
           path: artifacts
-
-      - name: Download the encoder digests
-        uses: actions/download-artifact@v4
-        with:
-          pattern: digest-*
-          path: digests
 
       - name: Package
         env:
@@ -155,36 +148,13 @@ jobs:
           sha256sum ./*.tar.gz > SHA256SUMS
           cat SHA256SUMS
 
-      - name: Collect the encoder digests
-        run: |
-          # Provenance for anyone keeping Opus fixtures: what each archive's encoder
-          # produced for a fixed input, recorded so that a future release can be compared
-          # against this one without re-running anything.
-          {
-            for dir in digests/digest-*; do
-              echo "[${dir#digests/digest-}]"
-              sed 's/^/  /' "$dir/digest.txt"
-            done
-          } | tee dist/ENCODER-DIGESTS
-
-          # Which archives agree, reported and not asserted. Measured at the time of
-          # writing: all x86_64 targets match each other across GCC and MSVC, and both
-          # aarch64 targets match across clang and GCC, while the two architectures differ —
-          # two sets of hand-written SIMD kernels doing float arithmetic. Fixtures are
-          # therefore valid per architecture, not per platform.
-          echo
-          echo "digest groups:"
-          for dir in digests/digest-*; do
-            printf '%s %s\n' "$(awk '$1=="digest"{print $2}' "$dir/digest.txt")" "${dir#digests/digest-}"
-          done | sort | awk '{ g[$1] = g[$1] " " $2 } END { for (d in g) print "  " d ":" g[d] }' 
-
       - name: Upload the assets to the draft
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           gh release upload "${{ needs.prepare.outputs.tag }}" \
-            dist/*.tar.gz dist/SHA256SUMS dist/ENCODER-DIGESTS --clobber
+            dist/*.tar.gz dist/SHA256SUMS --clobber
 
       - name: Add the consumer notes
         env:
@@ -219,8 +189,9 @@ jobs:
           point \`LIBOPUS_PREBUILT_DIR\` at it. \`macos-arm64\` is built for \`apple-m1\`,
           which every arm64 Mac satisfies.
 
-          \`SHA256SUMS\` covers every asset. \`ENCODER-DIGESTS\` records what each archive's
-          encoder produced for a fixed input, for projects with checked-in Opus fixtures.
+          \`SHA256SUMS\` covers every archive. Each archive's own MANIFEST also carries
+          \`sha256(library)\` — the hash of the \`.a\` or \`.lib\` itself, which is
+          reproducible across runs and machines, unlike the .tar.gz wrapping it.
           EOF
           gh release edit "$TAG" --notes-file notes.md
 

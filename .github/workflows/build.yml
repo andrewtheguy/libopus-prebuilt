@@ -103,17 +103,6 @@ jobs:
           [ -f "$bin" ] || bin="$bin.exe"
           "$bin"
           ./check-static.sh "$bin"
-          # A fingerprint of the encoder's *output*, published with the release as
-          # ENCODER-DIGESTS so that a project with pinned Opus fixtures can tell whether a
-          # future release would change them.
-          mkdir -p digest
-          "$bin" --digest | tee "digest/digest.txt"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: digest-${{ matrix.target }}
-          path: digest/digest.txt
-          if-no-files-found: error
 
       - name: Show what was built
         shell: bash

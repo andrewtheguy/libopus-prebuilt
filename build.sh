@@ -254,10 +254,19 @@ echo "   floor: $floor"
 cflags_note='(none)'
 [ ${#cflags[@]} -eq 0 ] || cflags_note="${cflags[*]}"
 
+echo ">> checksumming the archive"
+# The library's own hash, not the tarball's. A .tar.gz is not reproducible — gzip stamps an
+# mtime into its header — so the wrapper's checksum can only ever say "these are the bytes
+# that were published". This one says something stronger and more useful: *this is the same
+# library*, comparable across runs, machines and releases.
+lib_sha="$(sha256_of "$out/lib/$lib_name")"
+echo "   $lib_sha"
+
 {
   echo "opus $OPUS_VERSION"
   echo "target $target"
   echo "sha256(source) $OPUS_SHA256"
+  echo "sha256(library) $lib_sha"
   echo "library lib/$lib_name"
   echo "cpu_floor $floor"
   echo "simd_mode $simd_mode"
