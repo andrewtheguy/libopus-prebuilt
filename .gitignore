@@ -1,0 +1,6 @@
+# Fetched source, cmake trees, and the libraries themselves. Nothing built belongs in
+# git: the point of this repo is that the *release assets* are the artifacts, and a
+# committed .a is one nobody can tell apart from the one CI made.
+build/
+dist/
+.DS_Store
