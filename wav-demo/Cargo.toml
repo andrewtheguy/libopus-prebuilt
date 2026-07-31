@@ -1,0 +1,25 @@
+[package]
+name = "wav-demo"
+version = "0.1.0"
+edition = "2021"
+
+# An empty [workspace] table detaches this from the repository's workspace, so it resolves
+# its own dependencies and cannot affect the crates that get released. It is here to be a
+# *consumer*: it takes opus-prebuilt from git by tag, exactly as a real project would,
+# rather than by path.
+[workspace]
+
+[dependencies]
+# DO NOT bump this tag on every release. It is a sample, not a test.
+#
+# Nothing in CI builds this directory, and nothing breaks when it falls behind — an older
+# tag still resolves, still fetches the archives from the repository's latest release, and
+# still demonstrates the one thing this project is for. Keeping it current would mean a
+# commit after every release whose only content is a tag, which is exactly the maintenance
+# that `releases/latest/download/…` was chosen to avoid everywhere else.
+#
+# Bump it when you are *demonstrating* something new, or when the tag stops existing.
+opus = { package = "opus-prebuilt", git = "https://github.com/andrewtheguy/libopus-prebuilt", tag = "v1.6.1-20260731040343-d511491" }
+
+[profile.release]
+opt-level = 2
