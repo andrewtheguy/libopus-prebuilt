@@ -101,6 +101,16 @@ jobs:
           [ -f "$bin" ] || bin="$bin.exe"
           "$bin"
           ./check-static.sh "$bin"
+          # A fingerprint of the encoder's *output*, compared across CPU floors by the
+          # `floors` job below.
+          mkdir -p digest
+          "$bin" --digest | tee "digest/digest.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.target }}
+          path: digest/digest.txt
+          if-no-files-found: error
 
       - name: Show what was built
         shell: bash
@@ -112,10 +122,70 @@ jobs:
           path: dist/${{ matrix.target }}
           if-no-files-found: error
 
+  # Does raising the x86_64 floor change what the encoder *emits*?
+  #
+  # It is a fair question and it has a real consequence: a project with checked-in Opus
+  # fixtures needs to know whether its fixtures still match after the switch, and
+  # "probably, opus is stable" is not something anybody can act on. So the two archives
+  # that differ *only* in CPU floor encode the same input under pinned settings, and their
+  # digests are compared. Measured answer, at the time of writing: identical.
+  #
+  # It is an assertion rather than a printout because of what a future divergence would
+  # mean. If an opus bump or a flag change ever makes the floors disagree, whoever made
+  # that change has to tell consumers to re-run their encoder tests — and a line in a log
+  # nobody reads is not how that gets communicated.
+  floors:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digest-*
+          path: digests
+
+      - name: Compare the CPU floors
+        run: |
+          shopt -s nullglob
+          for dir in digests/digest-*; do
+            echo "== ${dir#digests/digest-}"
+            sed 's/^/   /' "$dir/digest.txt"
+          done
+
+          status=0
+          compared=0
+          # Same OS, same architecture, same compiler — only the floor differs. Comparing
+          # across architectures would be a different and much weaker claim, since libopus
+          # does not promise identical float output between, say, NEON and AVX2.
+          for pair in "linux-x86_64 linux-x86_64-baseline" \
+                      "windows-x86_64-msvc windows-x86_64-msvc-baseline"; do
+            set -- $pair
+            a="digests/digest-$1/digest.txt"
+            b="digests/digest-$2/digest.txt"
+            # A narrowed dispatch (`targets: arm64`) legitimately has no pair to compare.
+            if [ ! -f "$a" ] || [ ! -f "$b" ]; then
+              echo "-- skipped $1 vs $2: not both built in this run"
+              continue
+            fi
+            compared=$((compared + 1))
+            da="$(awk '$1=="digest"{print $2}' "$a")"
+            db="$(awk '$1=="digest"{print $2}' "$b")"
+            if [ "$da" = "$db" ]; then
+              echo "ok   $1 and $2 encode byte-identically ($da)"
+            else
+              echo "DIFF $1=$da  $2=$db"
+              echo "     Raising the CPU floor changed the encoder's output. This is not"
+              echo "     necessarily a bug, but every consumer with pinned Opus fixtures"
+              echo "     has to re-generate them, and the README has to say so." >&2
+              status=1
+            fi
+          done
+          echo "$compared floor pair(s) compared"
+          exit $status
+
   release:
     # Only a tag publishes. A `workflow_dispatch` run is for testing a target.
     if: startsWith(github.ref, 'refs/tags/')
-    needs: build
+    needs: [build, floors]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
