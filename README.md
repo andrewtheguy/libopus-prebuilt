@@ -18,7 +18,7 @@ One line, and no source changes:
 
 ```toml
 # was: opus = "0.3"
-opus = { package = "opus-prebuilt", git = "https://github.com/andrewtheguy/libopus-prebuilt", tag = "v1.6.1-20260730-1" }
+opus = { package = "opus-prebuilt", git = "https://github.com/andrewtheguy/libopus-prebuilt", tag = "v1.6.1-20260730-31c1f68" }
 ```
 
 (An example — use a tag that exists. See **Releasing** below for what the parts mean, and
@@ -241,23 +241,32 @@ Not opus versions — the pin only moves when you move it. These:
 
 ## Releasing
 
-Tags are `v<opus version>-<YYYYMMDD>-<n>`:
+Tags are `v<opus version>-<YYYYMMDD>-<short sha>`:
 
 ```sh
-git tag v1.6.1-20260730-1 && git push --tags   # CI builds all six targets and publishes
-./sync-prebuilt.sh --pin v1.6.1-20260730-1     # commit the checksums consumers verify
+. ./opus.env
+tag="v${OPUS_VERSION}-$(date +%Y%m%d)-$(git rev-parse --short HEAD)"
+git tag "$tag" && git push origin "$tag"   # CI builds all six targets and publishes
+./sync-prebuilt.sh --pin "$tag"            # commit the checksums consumers verify
 ```
 
-The version says what is inside; the date and counter say which build it was. That
+The version says what is inside, the date says when, and the hash says which commit. That
 separation is the point: this repository has reasons to release that have nothing to do
 with opus — a change to the Rust crates, a new CPU floor, a rebuilt archive — and each
-needs a tag of its own rather than an argument about re-tagging `v1.6.1`. The counter
-increments for a second release on the same day (`…-20260730-2`).
+needs a tag of its own rather than an argument about re-tagging `v1.6.1`.
 
-The `plan` job rejects a tag whose version disagrees with `opus.env`, because every asset
-filename is built from `OPUS_VERSION`: `v1.6.0-…` against a 1.6.1 pin would publish
-correctly-built archives under a version they are not, and `--pin` would then write that
-disagreement into a consumer's `prebuilt.sums`.
+A hash rather than a counter because nobody has to remember what number they are on, and
+because unlike a counter it can be **checked**. The `plan` job refuses a tag on either
+count:
+
+| wrong | why it is refused |
+|---|---|
+| the version disagrees with `opus.env` | every asset filename is built from `OPUS_VERSION`, so `v1.6.0-…` against a 1.6.1 pin publishes correctly-built archives under a version they are not — and `--pin` writes that into a consumer's `prebuilt.sums` as a URL that does not match the bytes it names |
+| the hash is not the commit being built | provenance that reads as trustworthy and is not is worse than none at all |
+
+The hash is compared as a prefix of the full SHA, not against `git rev-parse --short`,
+because git picks an abbreviation length from the repository's object count and the length
+on a runner need not match the length on your machine.
 
 The order matters: `--pin` reads the release's own `SHA256SUMS`, so the release has to
 exist first. Until a tag is pinned, `prebuilt.sums` has no entry for a target and a

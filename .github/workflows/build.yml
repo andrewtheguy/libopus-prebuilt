@@ -34,27 +34,48 @@ jobs:
       # those headers say. Cheap, and it runs before six compilers do.
       - run: ./sync-prebuilt.sh --check
 
-      # `v<opus>-<YYYYMMDD>-<n>`: the opus version says what is inside, and the date and
-      # counter say which build it was — because this repository releases for reasons that
-      # have nothing to do with opus (a change to the Rust crates, a new CPU floor) and
-      # those need a tag of their own rather than an argument about reusing v1.6.1.
+      # `v<opus>-<YYYYMMDD>-<short sha>`: the version says what is inside, the date says
+      # when, and the hash says *which commit* — because this repository releases for
+      # reasons that have nothing to do with opus (a change to the Rust crates, a new CPU
+      # floor, a rebuilt archive), and those need a tag of their own rather than an argument
+      # about re-tagging v1.6.1.
       #
-      # Checked here, before six compilers run, because every asset filename is built from
-      # OPUS_VERSION: a tag that disagrees publishes correctly-built archives under a
-      # version they are not, and `--pin` then writes that disagreement into a consumer's
-      # prebuilt.sums.
-      - name: Check the tag names this opus
+      # A hash rather than a counter for one reason: nobody has to remember what number
+      # they are on, and unlike a counter it can be *checked* — which is the next few lines.
+      # Both halves are worth refusing a tag over:
+      #
+      #   the version, because every asset filename is built from OPUS_VERSION, so
+      #   `v1.6.0-…` against a 1.6.1 pin publishes correctly-built archives under a version
+      #   they are not, and `--pin` writes that into a consumer's prebuilt.sums as a URL
+      #   that does not match the bytes it names;
+      #
+      #   the hash, because a tag naming a commit other than the one being built is worse
+      #   than a tag naming no commit at all — it is provenance that reads as trustworthy
+      #   and is not.
+      - name: Check the tag names this opus and this commit
         if: github.ref_type == 'tag'
         run: |
           . ./opus.env
+          tag="${{ github.ref_name }}"
           version_re="$(printf '%s' "$OPUS_VERSION" | sed 's/\./\\./g')"
-          if echo "${{ github.ref_name }}" | grep -Eq "^v${version_re}-[0-9]{8}-[0-9]+$"; then
-            echo "${{ github.ref_name }} names opus $OPUS_VERSION"
-          else
-            echo "tag ${{ github.ref_name }} is not v${OPUS_VERSION}-<YYYYMMDD>-<n>" >&2
-            echo "opus.env pins $OPUS_VERSION, and every asset is named for it." >&2
+          echo "$tag" | grep -Eq "^v${version_re}-[0-9]{8}-[0-9a-f]{7,40}$" || {
+            echo "tag $tag is not v${OPUS_VERSION}-<YYYYMMDD>-<short sha>" >&2
+            echo "opus.env pins $OPUS_VERSION, and every asset is named for it. Tag with:" >&2
+            echo "  git tag v${OPUS_VERSION}-\$(date +%Y%m%d)-\$(git rev-parse --short HEAD)" >&2
             exit 1
-          fi
+          }
+
+          # Compared as a prefix of the full SHA rather than against `git rev-parse --short`:
+          # git chooses an abbreviation length from the object count, so the length here need
+          # not match the length on the machine that made the tag.
+          short="${tag##*-}"
+          case "$GITHUB_SHA" in
+            "$short"*) echo "$tag names opus $OPUS_VERSION at $GITHUB_SHA" ;;
+            *)
+              echo "tag $tag says commit $short but this run is building $GITHUB_SHA" >&2
+              exit 1
+              ;;
+          esac
 
       # The matrix, narrowed here as *data* rather than by a job-level `if`. Two reasons,
       # one hard and one practical: a job-level condition cannot reference `matrix` at all
