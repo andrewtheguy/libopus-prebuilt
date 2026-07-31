@@ -222,8 +222,21 @@ gh run watch
 
 That builds both Windows archives, links the crates against them, runs the test suite, and
 then builds and runs `opus-e2e` on the runner — which is the only place `opus_encode` and
-`opus_decode` from an MSVC `opus.lib` are ever actually executed. Do it before tagging, not
-after.
+`opus_decode` from an MSVC `opus.lib` are ever actually executed.
+
+### Which workflow does what
+
+| workflow | trigger | what it does |
+|---|---|---|
+| `ci.yml` | every push and PR | shellcheck; parses every script under macOS's stock **bash 3.2**; builds and tests the x86_64 pair by *calling* `build.yml`; and builds as a consumer does, with an empty `prebuilt/`, to exercise the download-and-verify path nothing else takes |
+| `build.yml` | manual, or called | the six-target matrix: build, test, e2e binary, `check-static.sh`, CPU-floor comparison. Cannot publish — its token is read-only |
+| `release.yml` | manual | calls `build.yml` for all six, then packages, uploads and publishes |
+
+The split is about what changes commit to commit. The archives change only when `opus.env`
+or `build.sh` does, so rebuilding six of them on every push would be six runners proving a
+pinned tarball is still pinned. The crates and the scripts change constantly — and for a
+while nothing checked them unless somebody remembered to press a button, which is how a
+bash 3.2 incompatibility reached a commit.
 
 ## ABI notes, which are the real maintenance cost
 
