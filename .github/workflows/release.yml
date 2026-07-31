@@ -141,20 +141,18 @@ jobs:
             tar czf "dist/libopus-${VERSION}-${target}.tar.gz" -C "$dir" .
           done
 
-          # One checksum file over all of them. This is what a consumer's build verifies a
-          # download against — `./sync-prebuilt.sh --pin` copies it into prebuilt.sums, and
-          # crates/libopus-prebuilt-sys/build.rs checks it before unpacking anything.
-          cd dist
-          sha256sum ./*.tar.gz > SHA256SUMS
-          cat SHA256SUMS
+          # No checksum file. GitHub publishes a sha256 digest beside every asset already,
+          # visible on the release page and in the API, so one here would restate it — and
+          # the checksum that matters is the third-party one in opus.env, which build.sh
+          # enforces against Xiph's tarball before a compiler ever sees it.
+          ls -l dist
 
       - name: Upload the assets to the draft
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh release upload "${{ needs.prepare.outputs.tag }}" \
-            dist/*.tar.gz dist/SHA256SUMS --clobber
+          gh release upload "${{ needs.prepare.outputs.tag }}" dist/*.tar.gz --clobber
 
       - name: Add the consumer notes
         env:
@@ -176,8 +174,9 @@ jobs:
           opus = { package = "opus-prebuilt", git = "https://github.com/${GITHUB_REPOSITORY}", tag = "${TAG}" }
           \`\`\`
 
-          Then, in this repository, \`./sync-prebuilt.sh --pin ${TAG}\` and commit the
-          result — that is what lets a consumer's build download and verify an archive.
+          Nothing needs pinning: \`build.rs\` fetches the archive for its target from this
+          repository's latest release, so a consuming project picks this up by updating its
+          git dependency and nothing else.
 
           ## CPU floors
 
@@ -189,9 +188,9 @@ jobs:
           point \`LIBOPUS_PREBUILT_DIR\` at it. \`macos-arm64\` is built for \`apple-m1\`,
           which every arm64 Mac satisfies.
 
-          \`SHA256SUMS\` covers every archive. Each archive's own MANIFEST also carries
-          \`sha256(library)\` — the hash of the \`.a\` or \`.lib\` itself, which is
-          reproducible across runs and machines, unlike the .tar.gz wrapping it.
+          Each archive carries a MANIFEST recording \`sha256(library)\` — the hash of the
+          \`.a\` or \`.lib\` itself, which is reproducible across runs and machines, unlike
+          the .tar.gz wrapping it. GitHub's own per-asset digests cover the downloads.
           EOF
           gh release edit "$TAG" --notes-file notes.md
 
@@ -203,4 +202,3 @@ jobs:
         run: |
           gh release edit "${{ needs.prepare.outputs.tag }}" --draft=false
           echo "published ${{ needs.prepare.outputs.tag }}"
-          echo "next: ./sync-prebuilt.sh --pin ${{ needs.prepare.outputs.tag }} && git commit"

@@ -22,8 +22,8 @@ One line, and no source changes:
 opus = { package = "opus-prebuilt", git = "https://github.com/andrewtheguy/libopus-prebuilt", tag = "v1.6.1-20260731-731adf1" }
 ```
 
-(An example — use a tag that exists. See **Releasing** below for what the parts mean, and
-note that no tag is pinned until the first release is published and `--pin`ned.)
+(An example — use a tag that exists. See **Releasing** below for what the parts mean. The
+tag pins the *crate*; the archives always come from the repository's latest release.)
 
 `opus-prebuilt` sets `[lib] name = "opus"`, so every `use opus::…` and
 `opus::Decoder::new` keeps compiling untouched. No cmake, no C compiler, no pkg-config,
@@ -73,9 +73,8 @@ libopus's arithmetic, and a project with checked-in Opus fixtures would notice).
    an unsupported target, and the way to build with no network whatsoever.
 2. `crates/libopus-prebuilt-sys/prebuilt/<target>/` — what `./build.sh` +
    `./sync-prebuilt.sh` leave behind locally. Gitignored.
-3. the GitHub release named in `prebuilt.sums`, downloaded once per machine into
-   `$CARGO_HOME/libopus-prebuilt/` and **verified against the checksum committed in that
-   file before it is unpacked**.
+3. the repository's **latest** GitHub release, downloaded once per machine into
+   `$CARGO_HOME/libopus-prebuilt/`.
 
 (3) is what makes a fresh clone of a consuming project build with nothing installed. The
 cache living under `CARGO_HOME` means the many Docker builds that already cache
@@ -259,8 +258,7 @@ Two workflows, deliberately not one. *Build libopus* builds and tests and never 
 so what gets released is what passed, run by the same code rather than a copy of it.
 
 ```
-gh workflow run release.yml     # or the Actions tab. No tag to type.
-./sync-prebuilt.sh --pin <tag>  # then commit prebuilt.sums
+gh workflow run release.yml     # or the Actions tab. No tag to type, nothing to commit after.
 ```
 
 Tags are computed, never typed: `v<opus version>-<YYYYMMDD>-<short sha>`, e.g.
@@ -277,14 +275,15 @@ comes into being only when the draft is published as the final step. A release t
 half way leaves a draft somebody can delete rather than a tag pointing at archives nobody
 should link. A run from any branch but the default one is marked pre-release.
 
-Assets are the four archives and `SHA256SUMS` over them. Each archive carries its own
-MANIFEST, including `sha256(library)` — the hash of the `.a` or `.lib` itself, which unlike
-the tarball is reproducible. The release refuses to publish if any of the four is missing,
-because a release short an archive is discovered later, by somebody else, on the platform
-nobody tested.
+Assets are the four archives, each carrying a MANIFEST with `sha256(library)` — the hash of
+the `.a` or `.lib` itself, which unlike the tarball is reproducible. The release refuses to
+publish if any of the four is missing, because a release short an archive is discovered
+later, by somebody else, on the platform nobody tested.
 
-`--pin` reads the release's own `SHA256SUMS`, so it runs after the release exists; that is
-what turns the published bytes into something a consumer's `build.rs` can verify.
+**Publishing is the whole of releasing.** `build.rs` fetches from `releases/latest`, so
+there is no pin to update and no follow-up commit — which is the point: a pin naming a tag
+that encodes a commit can only ever be committed *after* that commit, leaving `main`
+permanently one commit ahead of whatever was released.
 
 ## Bumping opus
 
@@ -308,15 +307,22 @@ its MANIFEST, so that hash is comparable across runs, machines and releases — 
 same, it is the same library.
 
 The `.tar.gz` around it is a different matter and cannot be reproducible: gzip stamps an
-mtime into its header, so packing identical bytes twice gives two different files. That is
-why `SHA256SUMS` and `prebuilt.sums` make the narrower claim — *these are the bytes that
-were published* — which is exactly what a build script running `curl` needs, and the same
-discipline `opus.env` applies to the upstream tarball. Two questions, two checksums:
+mtime into its header, so packing identical bytes twice gives two different files. A
+checksum of one could only ever say *these are the bytes that were published*, which is
+what GitHub's own per-asset digest already says. Three questions, and only one of them
+needs a checksum this repository maintains:
 
 | question | answered by |
 |---|---|
-| did I download what was published? | `SHA256SUMS`, pinned into `prebuilt.sums`, checked by `build.rs` before unpacking |
+| is the source the pinned upstream release? | `OPUS_SHA256` in `opus.env`, checked by `build.sh` before anything is unpacked |
+| did I download what GitHub published? | GitHub's own per-asset digest, over TLS |
 | is this the same library as last time? | `sha256(library)` in each MANIFEST, asserted by CI's `reproducible` job |
+
+There is deliberately no checksum file of our own. The checksum worth keeping is the
+**third-party** one — `opus.env` pins Xiph's tarball, which is the supply chain this
+repository does not control. Hashing our own release assets on the way back out meant a
+committed file that had to be regenerated after every release, restating what GitHub
+already publishes beside each asset.
 
 For a project with pinned Opus fixtures, the honest answer is to run its own encoder tests
 after switching. This repository used to publish an `ENCODER-DIGESTS` file intended to

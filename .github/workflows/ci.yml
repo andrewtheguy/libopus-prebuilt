@@ -118,18 +118,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Is a release pinned yet?
-        id: pinned
-        run: |
-          if grep -q '^release ' crates/libopus-prebuilt-sys/prebuilt.sums; then
-            echo "yes=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "yes=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::prebuilt.sums names no release yet, so there is nothing to fetch."
-          fi
-
       - name: Build as a consumer does, with nothing prebuilt locally
-        if: steps.pinned.outputs.yes == 'true'
         run: |
           # No ./build.sh and no ./sync-prebuilt.sh. This is a clone with an empty
           # prebuilt/, which is the state every consuming project is in.
@@ -139,13 +128,12 @@ jobs:
           # Which source satisfied the link, asserted rather than assumed: if a stray
           # archive or a system libopus had satisfied it, this job would pass while testing
           # nothing at all.
-          grep -q 'linked statically from release asset' build.log || {
-            echo "::error::the archive did not come from the pinned release"
+          grep -q 'linked statically from latest release asset' build.log || {
+            echo "::error::the archive did not come from the release"
             exit 1
           }
 
       - name: Test and run the binary it fetched
-        if: steps.pinned.outputs.yes == 'true'
         run: |
           cargo test --workspace --release
           ./target/release/opus-e2e

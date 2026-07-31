@@ -9,14 +9,23 @@
 //   2. `prebuilt/<target>/` next to this file — what `./build.sh` + `./sync-prebuilt.sh`
 //      leave behind, and gitignored, because a committed `.a` is one nobody can tell
 //      apart from the one CI made.
-//   3. the GitHub release named in `prebuilt.sums`, downloaded once per machine into
-//      `$CARGO_HOME/libopus-prebuilt/` and **verified against the checksum in that
-//      file before it is unpacked** — the same rule `build.sh` applies to the opus
-//      source tarball, for the same reason. Bytes nobody pinned never reach a linker.
+//   3. the repository's **latest** GitHub release, downloaded once per machine into
+//      `$CARGO_HOME/libopus-prebuilt/`.
 //
 // (3) is what makes a fresh clone of a consuming project build with nothing installed;
 // (1) is what makes it work with no network at all.
-use std::fmt::Write as _;
+//
+// No checksum file, deliberately. The checksum worth having is the *third-party* one:
+// opus.env pins the SHA-256 of Xiph's source tarball and build.sh refuses to unpack
+// anything else, because that is the supply chain this repository does not control.
+// Hashing our own release assets on the way back out meant a file that had to be
+// regenerated and committed after every release, restating what GitHub already publishes
+// as a digest beside each asset and serves over TLS.
+//
+// `releases/latest/download/…` rather than a pinned tag, for the same reason: a tag written
+// in here is a tag that has to be updated in here. The asset name carries the opus version,
+// so a release of a *different* version cannot satisfy the URL — it 404s naming the version
+// rather than quietly returning the wrong library.
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -80,27 +89,11 @@ fn resolve(manifest: &Path, target: &str, version: &str) -> (PathBuf, String) {
         return (cached, format!("cache/{version}/{name}"));
     }
 
-    (fetch(manifest, name, version, &cached), format!("release asset for {name}"))
+    (fetch(manifest, name, version, &cached), format!("latest release asset for {name}"))
 }
 
-/// Download the release archive for one target, verify it, unpack it into the cache.
+/// Download the latest release's archive for one target and unpack it into the cache.
 fn fetch(manifest: &Path, name: &str, version: &str, cached: &Path) -> PathBuf {
-    let sums_path = manifest.join("prebuilt.sums");
-    println!("cargo:rerun-if-changed={}", sums_path.display());
-    let sums = std::fs::read_to_string(&sums_path)
-        .unwrap_or_else(|e| panic!("cannot read {}: {e}", sums_path.display()));
-
-    let asset = format!("libopus-{version}-{name}.tar.gz");
-    let (release, want) = parse_sums(&sums, &asset).unwrap_or_else(|| {
-        panic!(
-            "{} has no checksum for {asset}. Either this target was never released, or \
-             prebuilt.sums is stale — run ./sync-prebuilt.sh --pin <tag>. To build \
-             without the release, run ./build.sh {name} && ./sync-prebuilt.sh, or point \
-             LIBOPUS_PREBUILT_DIR at your own prefix.",
-            sums_path.display(),
-        )
-    });
-
     assert!(
         std::env::var("CARGO_NET_OFFLINE").as_deref() != Ok("true"),
         "libopus for {name} is not cached and cargo is offline. Run ./build.sh {name} && \
@@ -108,7 +101,9 @@ fn fetch(manifest: &Path, name: &str, version: &str, cached: &Path) -> PathBuf {
     );
 
     let repo = opus_env(manifest, "PREBUILT_REPO");
-    let url = format!("https://github.com/{repo}/releases/download/{release}/{asset}");
+    let asset = format!("libopus-{version}-{name}.tar.gz");
+    let url = format!("https://github.com/{repo}/releases/latest/download/{asset}");
+
     // Staged under a pid-suffixed name so two cargo builds racing here cannot read each
     // other's half-written tarball. The loser of the race throws its copy away below.
     let staging = cached.with_extension(format!("tmp{}", std::process::id()));
@@ -122,39 +117,20 @@ fn fetch(manifest: &Path, name: &str, version: &str, cached: &Path) -> PathBuf {
         tarball.to_str().unwrap(), &url,
     ]));
 
-    let bytes = std::fs::read(&tarball).expect("the download vanished");
-    let got = sha256_hex(&bytes);
-    assert_eq!(
-        got, want,
-        "checksum mismatch for {asset}\n  expected {want}\n  actual   {got}\nRefusing to \
-         unpack it. Nothing that is not the pinned artifact gets linked into a binary."
-    );
-
-    // `tar` rather than a Rust tar crate: it is present on macOS, on every Linux image
-    // that can run cargo, and in System32 on Windows 10 1803 and later, and a build
-    // dependency here would be one every consumer compiles.
+    // `tar` rather than a Rust tar crate: it is present on macOS, on every Linux image that
+    // can run cargo, and in System32 on Windows 10 1803 and later, and a build dependency
+    // here would be one every consumer compiles. It is also the integrity check that
+    // remains — a truncated or corrupt download does not extract.
     run(Command::new("tar").arg("xzf").arg(&tarball).arg("-C").arg(&staging));
     std::fs::remove_file(&tarball).ok();
 
     std::fs::create_dir_all(cached.parent().unwrap()).ok();
     if std::fs::rename(&staging, cached).is_err() {
-        // Either another build populated the cache first — fine, use theirs — or the
-        // rename genuinely failed, which the caller's `lib/` check will report.
+        // Either another build populated the cache first — fine, use theirs — or the rename
+        // genuinely failed, which the caller's `lib/` check will report.
         let _ = std::fs::remove_dir_all(&staging);
     }
     cached.to_path_buf()
-}
-
-/// `release <tag>` plus `<sha256>  <asset>` lines, which is the release's own
-/// SHA256SUMS with the tag written above it.
-fn parse_sums(sums: &str, asset: &str) -> Option<(String, String)> {
-    let release = sums.lines().find_map(|l| l.strip_prefix("release "))?.trim();
-    let want = sums.lines().find_map(|line| {
-        let (sha, file) = line.split_once("  ")?;
-        // The release writes `./libopus-…`; accept it with or without the prefix.
-        (Path::new(file.trim()).file_name()? == asset).then(|| sha.trim().to_string())
-    })?;
-    Some((release.to_string(), want))
 }
 
 fn run(cmd: &mut Command) {
@@ -219,100 +195,4 @@ fn opus_env(manifest: &Path, key: &str) -> String {
         .unwrap_or_else(|| panic!("no {key} in opus.env"))
         .trim()
         .to_string()
-}
-
-// ---------------------------------------------------------------------- sha256
-//
-// Written out rather than pulled in, because a build-dependency is something every
-// consumer of this crate compiles, and this is the only thing we would want from one.
-// FIPS 180-4; the self-test in `sha256_hex` is what keeps that claim honest.
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    // Known-answer test on every call. It costs a few microseconds and it means a
-    // mistake in the code below can never quietly turn checksum verification into a
-    // formality that passes whatever it is given.
-    const ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
-    if bytes != b"abc" {
-        assert_eq!(sha256_hex(b"abc"), ABC, "the sha256 implementation is broken");
-    }
-
-    let mut hex = String::with_capacity(64);
-    for byte in sha256(bytes) {
-        write!(hex, "{byte:02x}").unwrap();
-    }
-    hex
-}
-
-fn sha256(message: &[u8]) -> [u8; 32] {
-    const K: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
-        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
-        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
-        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
-        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
-        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
-        0xc67178f2,
-    ];
-    let mut h: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-        0x5be0cd19,
-    ];
-
-    // Message, 0x80, zero padding to 56 mod 64, then the bit length big-endian.
-    let mut padded = message.to_vec();
-    padded.push(0x80);
-    while padded.len() % 64 != 56 {
-        padded.push(0);
-    }
-    padded.extend_from_slice(&(message.len() as u64 * 8).to_be_bytes());
-
-    for chunk in padded.chunks_exact(64) {
-        let mut w = [0u32; 64];
-        for (i, word) in chunk.chunks_exact(4).enumerate() {
-            w[i] = u32::from_be_bytes(word.try_into().unwrap());
-        }
-        for i in 16..64 {
-            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
-            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-            w[i] = w[i - 16]
-                .wrapping_add(s0)
-                .wrapping_add(w[i - 7])
-                .wrapping_add(s1);
-        }
-
-        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = h;
-        for i in 0..64 {
-            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-            let ch = (e & f) ^ (!e & g);
-            let t1 = hh
-                .wrapping_add(s1)
-                .wrapping_add(ch)
-                .wrapping_add(K[i])
-                .wrapping_add(w[i]);
-            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-            let maj = (a & b) ^ (a & c) ^ (b & c);
-            let t2 = s0.wrapping_add(maj);
-
-            hh = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(t1);
-            d = c;
-            c = b;
-            b = a;
-            a = t1.wrapping_add(t2);
-        }
-        for (slot, value) in h.iter_mut().zip([a, b, c, d, e, f, g, hh]) {
-            *slot = slot.wrapping_add(value);
-        }
-    }
-
-    let mut out = [0u8; 32];
-    for (chunk, word) in out.chunks_exact_mut(4).zip(h) {
-        chunk.copy_from_slice(&word.to_be_bytes());
-    }
-    out
 }
