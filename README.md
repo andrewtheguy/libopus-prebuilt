@@ -18,7 +18,7 @@ One line, and no source changes:
 
 ```toml
 # was: opus = "0.3"
-opus = { package = "opus-prebuilt", git = "https://github.com/andrewtheguy/libopus-prebuilt", tag = "v1.6.1-20260730-31c1f68" }
+opus = { package = "opus-prebuilt", git = "https://github.com/andrewtheguy/libopus-prebuilt", tag = "v1.6.1-20260731-731adf1" }
 ```
 
 (An example — use a tag that exists. See **Releasing** below for what the parts mean, and
@@ -241,37 +241,37 @@ Not opus versions — the pin only moves when you move it. These:
 
 ## Releasing
 
-Tags are `v<opus version>-<YYYYMMDD>-<short sha>`:
+Two workflows, deliberately not one. *Build libopus* builds and tests and never publishes;
+*Release libopus archives* publishes, and does the building by **calling** the first one —
+so what gets released is what passed, run by the same code rather than a copy of it.
 
-```sh
-. ./opus.env
-tag="v${OPUS_VERSION}-$(date +%Y%m%d)-$(git rev-parse --short HEAD)"
-git tag "$tag" && git push origin "$tag"   # CI builds all six targets and publishes
-./sync-prebuilt.sh --pin "$tag"            # commit the checksums consumers verify
+```
+gh workflow run release.yml     # or the Actions tab. No tag to type.
+./sync-prebuilt.sh --pin <tag>  # then commit prebuilt.sums
 ```
 
-The version says what is inside, the date says when, and the hash says which commit. That
-separation is the point: this repository has reasons to release that have nothing to do
-with opus — a change to the Rust crates, a new CPU floor, a rebuilt archive — and each
-needs a tag of its own rather than an argument about re-tagging `v1.6.1`.
+Tags are computed, never typed: `v<opus version>-<YYYYMMDD>-<short sha>`, e.g.
+`v1.6.1-20260731-731adf1`. The version says what is inside, the UTC date says when, and the
+hash says which commit — and since the workflow derives all three from the tree it is
+building, none of them can disagree with it. That is also why there is nothing to validate:
+the failure mode of a hand-typed tag is a tag that lies, and the way to fix it is to stop
+typing tags. Releasing twice from one commit on one day is refused, because it would be the
+same tag.
 
-A hash rather than a counter because nobody has to remember what number they are on, and
-because unlike a counter it can be **checked**. The `plan` job refuses a tag on either
-count:
+The order is draft first, publish last, and the reason is worth knowing: **a draft release
+does not create the git tag.** Six builds, their tests, the e2e binaries, the CPU-floor
+comparison, packaging and upload all happen while the tag still does not exist, and it
+comes into being only when the draft is published as the final step. A release that fails
+half way leaves a draft somebody can delete rather than a tag pointing at archives nobody
+should link. A run from any branch but the default one is marked pre-release.
 
-| wrong | why it is refused |
-|---|---|
-| the version disagrees with `opus.env` | every asset filename is built from `OPUS_VERSION`, so `v1.6.0-…` against a 1.6.1 pin publishes correctly-built archives under a version they are not — and `--pin` writes that into a consumer's `prebuilt.sums` as a URL that does not match the bytes it names |
-| the hash is not the commit being built | provenance that reads as trustworthy and is not is worse than none at all |
+Assets are the six archives, `SHA256SUMS` over all of them, and `ENCODER-DIGESTS` — what
+each archive's encoder produced for a fixed input, for projects with pinned Opus fixtures.
+The release refuses to publish if any of the six is missing, because a release short an
+archive is discovered later, by somebody else, on the platform nobody tested.
 
-The hash is compared as a prefix of the full SHA, not against `git rev-parse --short`,
-because git picks an abbreviation length from the repository's object count and the length
-on a runner need not match the length on your machine.
-
-The order matters: `--pin` reads the release's own `SHA256SUMS`, so the release has to
-exist first. Until a tag is pinned, `prebuilt.sums` has no entry for a target and a
-consumer's build says so, naming the script to run — rather than fetching something
-nobody pinned.
+`--pin` reads the release's own `SHA256SUMS`, so it runs after the release exists; that is
+what turns the published bytes into something a consumer's `build.rs` can verify.
 
 ## Bumping opus
 
