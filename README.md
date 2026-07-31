@@ -274,12 +274,30 @@ on Windows, so switching to the AVX2 floor does not invalidate anybody's fixture
 future bump ever changes that, the pipeline fails and says so, because the alternative is
 a consumer discovering it from a diff in their own test suite.
 
-What the comparison deliberately does *not* claim is cross-platform: the same encode gives
-`1c9401524c39eb56` on Linux x86_64 and `31c60ddd44f907ed` on macOS arm64 — different
-architecture and different compiler, and libopus's float encoder does not promise
-otherwise. Nothing here introduced that; it is equally true of the `audiopus_sys` build.
-It does mean checked-in Opus fixtures are only ever valid for the platform that generated
-them, which is worth knowing before a CI runner and a developer's laptop disagree.
+The digests across all six targets say something more precise than "it depends on the
+platform", and it is worth knowing if you keep Opus fixtures anywhere:
+
+| targets | digest |
+|---|---|
+| `linux-x86_64`, `linux-x86_64-baseline`, and both `windows-x86_64-msvc` | `4359525edd8e721b` |
+| `linux-aarch64`, `macos-arm64` | `31c60ddd44f907ed` |
+
+So the encoder's output is stable **within** an architecture and varies **across** one.
+GCC on Linux and MSVC on Windows agree byte for byte; so do clang-on-macOS and
+GCC-on-Linux for arm64. What differs is x86_64 against aarch64, which is what you would
+expect from two sets of hand-written SIMD kernels doing float arithmetic — and it is
+equally true of the `audiopus_sys` build. Practically: fixtures generated on one
+architecture are valid on that architecture regardless of OS or compiler, and are not
+valid on the other.
+
+Only the floor pairs are *asserted*, because only they are a controlled comparison — same
+runner, same compiler, one variable. The grouping above is reported rather than enforced,
+since a runner image changing its compiler is a fact to notice, not a build to fail.
+
+One caveat about measuring this yourself: a digest taken under emulation is not the
+hardware answer. `./test-docker.sh` on Apple silicon runs x86_64 under QEMU, whose FMA
+rounding is not bit-accurate, and it produces a third value that no real machine does.
+Trust the pipeline's numbers over a local emulated one.
 
 ## Licensing
 
