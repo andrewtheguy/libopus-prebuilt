@@ -19,7 +19,7 @@ edition = "2021"
 # that `releases/latest/download/…` was chosen to avoid everywhere else.
 #
 # Bump it when you are *demonstrating* something new, or when the tag stops existing.
-opus = { package = "opus-prebuilt", git = "https://github.com/andrewtheguy/libopus-prebuilt", tag = "v1.6.1-20260731040343-d511491" }
+opus = { package = "opus-prebuilt", git = "https://github.com/andrewtheguy/libopus-prebuilt", tag = "v1.6.1-20260731073637-74aab76" }
 
 [profile.release]
 opt-level = 2
