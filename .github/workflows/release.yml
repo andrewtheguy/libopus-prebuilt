@@ -141,10 +141,18 @@ jobs:
             tar czf "dist/libopus-${VERSION}-${target}.tar.gz" -C "$dir" .
           done
 
-          # No checksum file. GitHub publishes a sha256 digest beside every asset already,
-          # visible on the release page and in the API, so one here would restate it — and
-          # the checksum that matters is the third-party one in opus.env, which build.sh
-          # enforces against Xiph's tarball before a compiler ever sees it.
+          # SHA256SUMS, generated here and published as an asset — never committed. GitHub
+          # does record a sha256 digest per asset, but only through `api.github.com`, which
+          # is a second request, rate-limited to 60/hour for anyone unauthenticated, and
+          # JSON that a zero-dependency build.rs would have to parse. An asset beside the
+          # archives is one more plain GET from the URL it is already using.
+          #
+          # It is a corruption check, not a tamper check: it lives on the same release as
+          # the files it covers, so it proves the download arrived intact, not that the
+          # release is honest. The checksum that constrains a party other than us is the
+          # one in opus.env, enforced against Xiph's tarball before a compiler runs.
+          (cd dist && sha256sum -- *.tar.gz > SHA256SUMS)
+          cat dist/SHA256SUMS
           ls -l dist
 
       - name: Upload the assets to the draft
@@ -152,7 +160,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh release upload "${{ needs.prepare.outputs.tag }}" dist/*.tar.gz --clobber
+          gh release upload "${{ needs.prepare.outputs.tag }}" \
+            dist/SHA256SUMS dist/*.tar.gz --clobber
 
       - name: Add the consumer notes
         env:
@@ -188,9 +197,21 @@ jobs:
           point \`LIBOPUS_PREBUILT_DIR\` at it. \`macos-arm64\` is built for \`apple-m1\`,
           which every arm64 Mac satisfies.
 
-          Each archive carries a MANIFEST recording \`sha256(library)\` — the hash of the
-          \`.a\` or \`.lib\` itself, which is reproducible across runs and machines, unlike
-          the .tar.gz wrapping it. GitHub's own per-asset digests cover the downloads.
+          ## Checking what you downloaded
+
+          \`\`\`
+          curl -sSLO https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/SHA256SUMS
+          sha256sum -c SHA256SUMS --ignore-missing
+          \`\`\`
+
+          \`build.rs\` does the same thing automatically for the archive it fetches, then
+          hashes the extracted \`.a\`/\`.lib\` against the \`sha256(library)\` line in that
+          archive's own MANIFEST. Both are corruption checks — SHA256SUMS is published on
+          the same release as the files it covers — and both need no API call.
+
+          \`sha256(library)\` is also the interesting one to compare *between* releases: the
+          library is reproducible across runs and machines, unlike the .tar.gz wrapping it,
+          so two releases of the same opus with the same flags list the same hash.
           EOF
           gh release edit "$TAG" --notes-file notes.md
 

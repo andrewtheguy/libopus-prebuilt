@@ -79,17 +79,36 @@ case "${1:-}" in
 
   --fetch)
     # For working offline afterwards, or for testing a target this machine cannot build.
-    # Takes whatever the latest release holds, which is the same thing build.rs would fetch.
+    # Takes whatever the latest release holds, which is the same thing build.rs would fetch
+    # — including the SHA256SUMS check, because a download verified in one half of this
+    # repository and not the other is a difference someone would eventually trip over.
+    base="https://github.com/$PREBUILT_REPO/releases/latest/download"
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+
+    echo ">> SHA256SUMS"
+    curl -sSL --fail --max-time 300 -o "$tmp/SHA256SUMS" "$base/SHA256SUMS"
+
     for target in "${targets[@]}"; do
       asset="libopus-${OPUS_VERSION}-${target}.tar.gz"
       echo ">> $asset"
-      tmp="$(mktemp -d)"
-      curl -sSL --fail --max-time 300 -o "$tmp/$asset" \
-        "https://github.com/$PREBUILT_REPO/releases/latest/download/$asset"
+      curl -sSL --fail --max-time 300 -o "$tmp/$asset" "$base/$asset"
+
+      # `./` tolerated on the name for the same reason build.rs tolerates it: how the
+      # release job spelled its glob should not be able to break this.
+      expected="$(awk -v a="$asset" '$2 == a || $2 == "./" a { print $1 }' "$tmp/SHA256SUMS")"
+      [ -n "$expected" ] || { echo "SHA256SUMS does not list $asset" >&2; exit 1; }
+      actual="$(sha256_of "$tmp/$asset")"
+      [ "$actual" = "$expected" ] || {
+        echo "checksum mismatch for $asset" >&2
+        echo "  SHA256SUMS says $expected" >&2
+        echo "  the download is $actual" >&2
+        exit 1
+      }
+
       rm -rf "${prebuilt:?}/${target:?}"
       mkdir -p "$prebuilt/$target"
       tar xzf "$tmp/$asset" -C "$prebuilt/$target"
-      rm -rf "$tmp"
     done
     ;;
 

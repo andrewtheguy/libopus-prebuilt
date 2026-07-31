@@ -109,10 +109,10 @@ jobs:
           echo "  reproducible: same source, same flags, same library"
 
   # The one path nothing else takes. Every other job populates `prebuilt/` from a local
-  # build first, which means build.rs's third resolution step — download the release asset,
-  # verify it against the checksum in prebuilt.sums, unpack it — is what every *consumer's*
-  # first build does and the one thing building here never exercises. This job leaves
-  # prebuilt/ empty on purpose and lets it fetch.
+  # build first, which means build.rs's third resolution step — download the asset, check it
+  # against the release's SHA256SUMS, unpack it, hash the library against its MANIFEST — is
+  # what every *consumer's* first build does and the one thing building here never
+  # exercises. This job leaves prebuilt/ empty on purpose and lets it fetch.
   consumer-fetch:
     runs-on: ubuntu-24.04
     steps:
@@ -132,6 +132,17 @@ jobs:
             echo "::error::the archive did not come from the release"
             exit 1
           }
+
+          # And that both integrity checks ran. A verification that silently stops running
+          # is worse than one that was never written, because the log still looks right —
+          # so the log is what gets checked.
+          for claim in 'matches SHA256SUMS' 'matches the MANIFEST'; do
+            grep -q "$claim" build.log || {
+              echo "::error::build.rs did not report '$claim' — the check did not run"
+              exit 1
+            }
+          done
+          echo "download and archive both verified"
 
       - name: Test and run the binary it fetched
         run: |
