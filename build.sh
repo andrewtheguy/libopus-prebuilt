@@ -88,6 +88,7 @@ cmake_args+=(-DCMAKE_POLICY_VERSION_MINIMUM=3.5)
 # unconditionally (`OPUS_X86_PRESUME_*`); `dispatch` means opus checks CPUID and
 # chooses, which is what upstream does by default.
 simd_mode=dispatch
+floor='x86-64 baseline (SSE2; SSE4.1/AVX2 by CPUID at runtime)'
 
 lib_name=libopus.a
 case "$target" in
@@ -105,6 +106,7 @@ case "$target" in
     # otherwise. NEON itself is already unconditional here: opus's cmake sets
     # OPUS_PRESUME_NEON for any aarch64 target (cmake/OpusConfig.cmake:77).
     simd_mode=presume
+    floor='apple-m1 (armv8.4, NEON unconditional)'
     if cflag_supported -mcpu=apple-m1; then
       cflags+=(-mcpu=apple-m1)
     else
@@ -126,6 +128,7 @@ case "$target" in
     # Pentium and Celeron parts *of* the Coffee Lake generation, which have AVX2 fused
     # off. `linux-x86_64-baseline` exists for those.
     simd_mode=presume
+    floor='x86-64-v3 / Coffee Lake (AVX2+FMA unconditional)'
     cmake_args+=(-DOPUS_X86_PRESUME_SSE4_1=ON -DOPUS_X86_PRESUME_AVX2=ON)
     cflags+=(-march=x86-64-v3 -mtune=skylake)
     ;;
@@ -134,7 +137,8 @@ case "$target" in
     # compiled and chosen by CPUID at runtime. Runs anywhere x86_64 runs.
     ;;
   linux-aarch64)
-    # No floor to name. Unlike the Mac, arm64 Linux spans a decade of very different
+    floor='armv8-a (NEON unconditional)'
+    # No floor to *choose*. Unlike the Mac, arm64 Linux spans a decade of very different
     # cores, and NEON — the part opus actually hand-writes — is mandatory in ARMv8-A
     # and therefore already unconditional.
     simd_mode=presume
@@ -150,6 +154,7 @@ case "$target" in
       # which is the whole of what cl.exe offers here — there is no `/arch:` level
       # between AVX2 and AVX512, and no separate tuning flag.
       simd_mode=presume
+      floor='x86-64-v3 / Coffee Lake (AVX2+FMA unconditional)'
       cmake_args+=(-DOPUS_X86_PRESUME_SSE4_1=ON -DOPUS_X86_PRESUME_AVX2=ON)
     fi
     ;;
@@ -223,14 +228,6 @@ echo "   $found $want $evidence"
 # while one that quietly *lost* it SIGILLs on a machine below the floor, in the field,
 # for whoever runs the oldest CPU. So the claim is checked rather than trusted.
 echo ">> verifying the CPU floor"
-floor="$(
-  case "$target" in
-    macos-arm64) echo 'apple-m1 (armv8.4, NEON unconditional)' ;;
-    linux-aarch64) echo 'armv8-a (NEON unconditional)' ;;
-    linux-x86_64 | windows-x86_64-msvc) echo 'x86-64-v3 / Coffee Lake (AVX2+FMA unconditional)' ;;
-    *) echo 'x86-64 baseline (SSE2; SSE4.1/AVX2 by CPUID at runtime)' ;;
-  esac
-)"
 
 case "$target:$simd_mode" in
   *x86_64*:presume)
@@ -262,6 +259,9 @@ case "$target:$simd_mode" in
 esac
 echo "   floor: $floor"
 
+cflags_note='(none)'
+[ ${#cflags[@]} -eq 0 ] || cflags_note="${cflags[*]}"
+
 {
   echo "opus $OPUS_VERSION"
   echo "target $target"
@@ -270,7 +270,7 @@ echo "   floor: $floor"
   echo "cpu_floor $floor"
   echo "simd_mode $simd_mode"
   echo "simd_evidence $found $evidence"
-  echo "cflags ${cflags[*]:-(none)}"
+  echo "cflags $cflags_note"
   echo "cmake_args ${cmake_args[*]}"
 } > "$out/MANIFEST"
 

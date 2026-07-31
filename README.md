@@ -35,6 +35,7 @@ Two crates are involved:
 |---|---|
 | `libopus-prebuilt-sys` | the FFI, and a build script that finds the right archive and emits two link flags |
 | `opus-prebuilt` | `opus` 0.3.1, verbatim, with its `extern crate audiopus_sys` line pointing at the above |
+| `opus-e2e` | not a library: a consumer, written with the same dependency line you would use, built and *run* by the pipeline on all six targets |
 
 Keeping the safe wrapper byte-identical to upstream is deliberate: the consuming projects
 are written against *its* semantics, and this repository should have no opinion about
