@@ -135,7 +135,50 @@ fn round_trip(report: &mut Report, rate: u32, channels: Channels, mode: Applicat
     report.check(&format!("{label}: signal survives the round trip"), ratio > 0.5 && ratio < 2.0);
 }
 
+/// A fingerprint of what the encoder *produced*, for comparing one build against another.
+///
+/// The reason this exists: raising the x86_64 floor to AVX2 lets the compiler contract
+/// multiply-adds, and libopus's SIMD kernels are not promised to be bit-identical to its
+/// scalar ones. So a project with checked-in Opus fixtures has a real question — will its
+/// fixtures still match? — and "probably" is not an answer anybody can act on. Printing a
+/// digest lets the pipeline compare the Coffee Lake and baseline archives directly and
+/// state the result as a fact.
+///
+/// Every knob that could make this vary for an uninteresting reason is pinned: CBR, fixed
+/// complexity, no FEC or DTX, a fixed input, a fixed frame count. What remains is the
+/// codec's own arithmetic.
+fn digest() {
+    let mut encoder = Encoder::new(48_000, Channels::Mono, Application::Audio).unwrap();
+    encoder.set_bitrate(Bitrate::Bits(64_000)).unwrap();
+    encoder.set_vbr(false).unwrap();
+    encoder.set_complexity(10).unwrap();
+    encoder.set_inband_fec(false).unwrap();
+    encoder.set_dtx(false).unwrap();
+
+    let input = tone(48_000, 1);
+    // FNV-1a over every byte of every packet. Not a cryptographic claim — the only
+    // question asked of it is whether two builds produced the same bytes.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut total = 0usize;
+    for _ in 0..50 {
+        let packet = encoder.encode_vec(&input, 4000).unwrap();
+        total += packet.len();
+        for byte in &packet {
+            hash = (hash ^ *byte as u64).wrapping_mul(0x100_0000_01b3);
+        }
+    }
+    println!("libopus {}", opus::version());
+    println!("arch    {}", std::env::consts::ARCH);
+    println!("bytes   {total}");
+    println!("digest  {hash:016x}");
+}
+
 fn main() -> ExitCode {
+    if std::env::args().any(|a| a == "--digest") {
+        digest();
+        return ExitCode::SUCCESS;
+    }
+
     let mut report = Report { passed: 0, failed: Vec::new() };
 
     let version = opus::version();
