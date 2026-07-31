@@ -48,7 +48,7 @@ build_image() {
   docker build -q --platform "$platform" -t "$tag" -f - . <<'DOCKERFILE' >/dev/null
 FROM rust:1-bookworm
 RUN apt-get update \
- && apt-get install -y --no-install-recommends cmake binutils \
+ && apt-get install -y --no-install-recommends cmake binutils valgrind \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /work
 DOCKERFILE
@@ -87,6 +87,34 @@ for entry in "${targets[@]}"; do
         cargo build --offline --release --workspace
         ./target/docker-${platform##*/}/release/opus-e2e | tail -3
         ./check-static.sh ./target/docker-${platform##*/}/release/opus-e2e
+
+        # Leak checking, exactly rather than by watching RSS. valgrind interposes on
+        # malloc, so it sees the allocations libopus makes in C — which is the whole
+        # difficulty: a Rust GlobalAlloc counter observes only Rust-side allocation and
+        # would report a clean run no matter how badly the handles leaked.
+        #
+        # definite,indirect and not 'possible': Rust's runtime holds interior pointers that
+        # valgrind reasonably calls possibly-lost, and a missing opus_*_destroy is always
+        # definitely-lost, so the narrower set is both quieter and sufficient.
+        echo '>> valgrind'
+        bin=./target/docker-${platform##*/}/release/opus-e2e
+        OPUS_E2E_MEMORY=off valgrind --leak-check=full \\
+          --errors-for-leak-kinds=definite,indirect --error-exitcode=1 \\
+          \"\$bin\" >/dev/null 2>valgrind.log \\
+          || { echo '   valgrind found a leak:'; grep -E 'lost|ERROR SUMMARY' valgrind.log; exit 1; }
+
+        # The control. A clean valgrind run means nothing unless valgrind can see these
+        # allocations at all, so point it at a process that leaks on purpose and require
+        # it to fail. Passing here would mean the check above proves nothing.
+        if OPUS_E2E_MEMORY=off valgrind --leak-check=full \\
+             --errors-for-leak-kinds=definite,indirect --error-exitcode=1 \\
+             \"\$bin\" --leak-only >/dev/null 2>&1; then
+          echo '   valgrind did not notice a deliberate leak — the check is blind' >&2
+          exit 1
+        fi
+        echo '   no leaks, and the control is detected'
+        rm -f valgrind.log
+
         echo
         cat dist/$target/MANIFEST
       "; then

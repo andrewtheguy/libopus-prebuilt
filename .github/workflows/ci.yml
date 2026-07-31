@@ -108,6 +108,48 @@ jobs:
           }
           echo "  reproducible: same source, same flags, same library"
 
+  # Leak checking on the one platform that has `leaks` — macOS. The other two legs of this
+  # live elsewhere: valgrind runs under `test-docker.sh` on Linux, and the e2e binary's own
+  # RSS churn test runs on all four targets, Windows included.
+  #
+  # `leaks` rather than a Rust allocator hook, because libopus allocates with C `malloc`.
+  # A `GlobalAlloc` counter sees only Rust-side allocation and would report a clean run
+  # however badly the handles leaked — which is why the control below is not optional.
+  leaks:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # No local build: fetching the release archive is faster than compiling libopus, and
+      # it is the artifact consumers actually link.
+      - name: Build the e2e binary
+        run: cargo build --release -p opus-e2e
+
+      - name: No leaks
+        env:
+          # Required, not tidiness. The binary's own RSS check leaks 1200 handles on purpose
+          # as *its* control, so without this `leaks` reports 31 MB and the job fails on a
+          # leak the test deliberately created. Turning that section off leaves the exact
+          # tool doing the measuring, which is the better instrument anyway.
+          OPUS_E2E_MEMORY: "off"
+        run: |
+          # --atExit runs the process to completion and inspects it just before it dies,
+          # which is the only moment a leak is distinguishable from memory still in use.
+          MallocStackLogging=1 leaks --atExit -- ./target/release/opus-e2e >leaks.log 2>&1 \
+            || { grep -E 'leaks for|Leak:' leaks.log | head -20; exit 1; }
+          grep -E 'leaks for' leaks.log
+
+      - name: And the control — a deliberate leak must be caught
+        run: |
+          # If this passes, the check above proves nothing: it would mean `leaks` cannot
+          # see libopus's allocations, and a clean report is a blind one.
+          if MallocStackLogging=1 leaks --atExit -- \
+               ./target/release/opus-e2e --leak-only >control.log 2>&1; then
+            echo "::error::leaks did not notice 60 forgotten libopus handles"
+            exit 1
+          fi
+          grep -E 'leaks for' control.log
+
   # The one path nothing else takes. Every other job populates `prebuilt/` from a local
   # build first, which means build.rs's third resolution step — download the asset, check it
   # against the release's SHA256SUMS, unpack it, hash the library against its MANIFEST — is

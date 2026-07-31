@@ -135,7 +135,141 @@ fn round_trip(report: &mut Report, rate: u32, channels: Channels, mode: Applicat
     report.check(&format!("{label}: signal survives the round trip"), ratio > 0.5 && ratio < 2.0);
 }
 
+// ---------- memory ----------
+//
+// If upstream libopus does not leak, the only way this project can is a `*_create` with no
+// matching destroy — five allocating entry points in the FFI, five `Drop` impls. What
+// follows checks that pairing three ways, because each tool covers a platform the others
+// cannot: this in-process churn test runs everywhere including Windows, valgrind runs under
+// `test-docker.sh`, and `leaks` runs on the macOS CI job.
+//
+// A leak detector that cannot see libopus's allocations reports zero and looks like a pass.
+// libopus calls C `malloc` directly, so a Rust `GlobalAlloc` counter would be exactly that
+// kind of blind instrument — it observes only Rust-side allocation and would report zero
+// however badly the handles leaked. So every mode here is paired with a control that leaks
+// on purpose, and the control **failing to be detected** is itself a failed check.
+
+/// Resident set size in KB. Three implementations because there is no portable one, and
+/// none of them needs a dependency.
+fn rss_kb() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        // VmRSS is already in kB, which sidesteps the page size — 4 K on most arm64 Linux
+        // but not guaranteed, and a hardcoded 4096 would silently misreport by 16x.
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        status
+            .lines()
+            .find_map(|l| l.strip_prefix("VmRSS:"))
+            .and_then(|v| v.split_whitespace().next()?.parse().ok())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+            .output()
+            .ok()?;
+        String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+    }
+    #[cfg(windows)]
+    {
+        let out = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                &format!("(Get-Process -Id {}).WorkingSet64", std::process::id()),
+            ])
+            .output()
+            .ok()?;
+        String::from_utf8_lossy(&out.stdout).trim().parse::<u64>().ok().map(|b| b / 1024)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        None
+    }
+}
+
+/// Create every kind of handle `n` times. With `leak`, the handles are forgotten instead
+/// of dropped — which is the control, and the only place in this repository that does it.
+fn churn(n: usize, leak: bool) {
+    let pcm = vec![0i16; 1920];
+    let mut out = vec![0i16; 1920];
+    for _ in 0..n {
+        let mut enc = Encoder::new(48_000, Channels::Stereo, Application::Audio).unwrap();
+        let mut dec = Decoder::new(48_000, Channels::Stereo).unwrap();
+        let rp = opus::Repacketizer::new().unwrap();
+        // Encode and decode as well as allocate: a handle that is created and immediately
+        // destroyed may never touch the buffers a real one does.
+        let packet = enc.encode_vec(&pcm, 4000).unwrap();
+        dec.decode(&packet, &mut out, false).unwrap();
+        if leak {
+            std::mem::forget(enc);
+            std::mem::forget(dec);
+            std::mem::forget(rp);
+        }
+    }
+}
+
+/// Churn with a settled baseline, reporting how far RSS moved.
+fn rss_growth(n: usize, leak: bool) -> Option<i64> {
+    // Warm up first. The allocator grows its arenas on the first few handles, and counting
+    // that as a leak would make the honest path fail.
+    churn(64, false);
+    let before = rss_kb()?;
+    churn(n, leak);
+    let after = rss_kb()?;
+    Some(after as i64 - before as i64)
+}
+
+fn memory_checks(report: &mut Report) {
+    println!("\nmemory");
+    // Under valgrind this section is both redundant and painfully slow — twelve thousand
+    // encoder states, each memset by the codec, on an instrumented allocator. valgrind is
+    // measuring the same property exactly, so `test-docker.sh` turns this off rather than
+    // waiting for it.
+    if std::env::var("OPUS_E2E_MEMORY").as_deref() == Ok("off") {
+        println!("  skip  OPUS_E2E_MEMORY=off — an exact leak checker is doing this instead");
+        return;
+    }
+    let Some(_) = rss_kb() else {
+        println!("  skip  no RSS on this platform — valgrind and leaks still cover it");
+        return;
+    };
+
+    // The control runs first and on purpose: 3 handles x 400 is roughly 10 MB of libopus
+    // state, which the measurement must be able to see. If it cannot, every other result
+    // in this section is worthless and this check says so.
+    let leaked = rss_growth(400, true).unwrap_or(0);
+    println!("  ..    leaking 1200 handles moved RSS by {leaked} KB");
+    report.check(
+        "the measurement can see a deliberate leak",
+        leaked > 4_000,
+    );
+
+    // And the real thing. Ten times the churn of the control, all of it dropped.
+    let honest = rss_growth(4_000, false).unwrap_or(i64::MAX);
+    println!("  ..    12000 handles created and dropped moved RSS by {honest} KB");
+    report.check("creating and dropping handles does not grow RSS", honest < 4_000);
+}
+
+/// Leak on purpose and exit. Not reachable by accident — it exists so that valgrind and
+/// `leaks` can be pointed at a process that definitely leaks, proving those tools see
+/// libopus's allocations before their clean runs are believed.
+///
+/// Far fewer handles than the RSS control needs: those tools count bytes exactly, so three
+/// would do, where RSS has to clear the noise of a moving heap. Keeping it small matters
+/// because this runs under valgrind, where every allocation is instrumented.
+fn leak_only() -> ExitCode {
+    println!("--leak-only: forgetting 60 libopus handles on purpose");
+    println!("a leak detector that reports nothing here cannot see libopus at all");
+    churn(20, true);
+    ExitCode::SUCCESS
+}
+
 fn main() -> ExitCode {
+    if std::env::args().any(|a| a == "--leak-only") {
+        return leak_only();
+    }
+
     let mut report = Report { passed: 0, failed: Vec::new() };
 
     let version = opus::version();
@@ -173,6 +307,8 @@ fn main() -> ExitCode {
         }
         Err(e) => report.check(&format!("repacketizer ({e})"), false),
     }
+
+    memory_checks(&mut report);
 
     println!();
     if report.failed.is_empty() {
