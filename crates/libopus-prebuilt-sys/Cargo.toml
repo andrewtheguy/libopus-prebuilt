@@ -1,0 +1,26 @@
+[package]
+name = "libopus-prebuilt-sys"
+version.workspace = true
+edition = "2021"
+# 2021, not 2024, and no MSRV-raising syntax: this crate's whole job is to be linkable
+# from other people's projects, so it should not be the thing that forces a toolchain
+# upgrade on any of them.
+rust-version = "1.70"
+description = "Raw FFI for libopus, linked from a prebuilt static archive — no cmake"
+license = "BSD-3-Clause"
+repository = "https://github.com/andrewtheguy/libopus-prebuilt"
+# Declared so that two crates linking libopus into one binary is a cargo error rather
+# than a duplicate-symbol link error, and so consumers can read DEP_OPUS_INCLUDE.
+links = "opus"
+build = "build.rs"
+# git-only, deliberately: the archives are what makes this crate work and they are large
+# binary files. Nothing here is fit for crates.io.
+publish = false
+
+[features]
+# Off by default: the x86_64 archives are built for a Coffee Lake floor, which is what
+# the projects consuming this asked for. Turn this on to link the archive that keeps
+# opus's runtime CPU dispatch and runs on any x86_64 — see the README's "CPU floors".
+x86-baseline = []
+
+[dependencies]

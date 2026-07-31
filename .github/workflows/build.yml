@@ -3,8 +3,19 @@ name: Build libopus
 # Manual, and on a tag. There is nothing to build on a push: the source is a pinned
 # tarball and the flags are in `build.sh`, so a run's output only changes when one of
 # those does — which is a commit somebody makes deliberately, followed by a tag.
+#
+# The manual trigger is not only for reading logs. Windows is the one target that cannot
+# be built or tested anywhere else here — Docker covers Linux (`./test-docker.sh`) and a
+# Mac covers itself — so `workflow_dispatch` with `targets: windows` *is* the Windows test
+# loop, and it is meant to be used before tagging rather than after.
 on:
   workflow_dispatch:
+    inputs:
+      targets:
+        description: "which targets to build and test"
+        type: choice
+        default: all
+        options: [all, windows, x86_64, arm64]
   push:
     tags: ["v*"]
 
@@ -12,34 +23,84 @@ permissions:
   contents: write
 
 jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      targets: ${{ steps.matrix.outputs.targets }}
+    steps:
+      - uses: actions/checkout@v5
+
+      # That the committed headers are the pinned opus's, and that src/consts.rs is what
+      # those headers say. Cheap, and it runs before six compilers do.
+      - run: ./sync-prebuilt.sh --check
+
+      # The matrix, narrowed here as *data* rather than by a job-level `if`. Two reasons,
+      # one hard and one practical: a job-level condition cannot reference `matrix` at all
+      # — GitHub rejects the workflow outright — and filtering before the fan-out means a
+      # `targets: windows` dispatch starts two runners instead of six.
+      #
+      # `features` is spelled out even where it is empty, so `${{ matrix.features }}` is
+      # always a defined key rather than a silent blank.
+      - id: matrix
+        env:
+          GROUP: ${{ inputs.targets || 'all' }}
+        run: |
+          all='[
+            {"target":"macos-arm64",                 "runs-on":"macos-latest",   "group":"arm64",   "features":""},
+            {"target":"linux-x86_64",                "runs-on":"ubuntu-24.04",   "group":"x86_64",  "features":""},
+            {"target":"linux-x86_64-baseline",       "runs-on":"ubuntu-24.04",   "group":"x86_64",  "features":"--features opus-prebuilt/x86-baseline"},
+            {"target":"linux-aarch64",               "runs-on":"ubuntu-24.04-arm","group":"arm64",  "features":""},
+            {"target":"windows-x86_64-msvc",         "runs-on":"windows-latest", "group":"windows", "features":""},
+            {"target":"windows-x86_64-msvc-baseline","runs-on":"windows-latest", "group":"windows", "features":"--features opus-prebuilt/x86-baseline"}
+          ]'
+          # A tag always builds everything: a release missing an asset is a build failure
+          # for whoever needs that target, discovered later and by somebody else.
+          [ "${{ github.event_name }}" = workflow_dispatch ] || GROUP=all
+          targets="$(jq -c --arg g "$GROUP" '[.[] | select($g == "all" or .group == $g)]' <<<"$all")"
+          echo "$targets" | jq -r '.[].target' | sed 's/^/  /'
+          echo "targets=$targets" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: plan
     strategy:
-      # No fail-fast: one target failing to configure is exactly the case where the
-      # other three logs are the useful comparison.
+      # No fail-fast: one target failing to configure is exactly the case where the other
+      # five logs are the useful comparison.
       fail-fast: false
       matrix:
-        include:
-          - target: macos-arm64
-            runs-on: macos-latest
-            library: libopus.a
-          - target: linux-x86_64
-            runs-on: ubuntu-24.04
-            library: libopus.a
-          - target: linux-aarch64
-            runs-on: ubuntu-24.04-arm
-            library: libopus.a
-          - target: windows-x86_64-msvc
-            runs-on: windows-latest
-            library: opus.lib
+        include: ${{ fromJSON(needs.plan.outputs.targets) }}
     runs-on: ${{ matrix.runs-on }}
     steps:
       - uses: actions/checkout@v5
 
       # bash on the Windows runner too, so one script covers every target. cmake is
-      # preinstalled on all four images.
+      # preinstalled on all three images.
       - name: Build ${{ matrix.target }}
         shell: bash
         run: ./build.sh ${{ matrix.target }}
+
+      # The half of the artifact the archive alone does not cover: whether Rust can *link*
+      # it. That is what has broken before — a CRT mismatch, an `opus.lib` under a name
+      # nobody expected, an `.a` for the wrong ABI — and none of it shows up in a
+      # successful cmake run. `--offline`, after sync-prebuilt.sh, also demonstrates the
+      # claim consumers care about: once the archive exists, no build needs a network.
+      - name: Link and test against it
+        shell: bash
+        run: |
+          ./sync-prebuilt.sh
+          cargo test --offline --workspace ${{ matrix.features }}
+
+      # The end-to-end leg: a release binary that is a *consumer* of the crate, executed
+      # on the runner's own processor. This is where the CPU floor stops being a claim in a
+      # MANIFEST — an AVX2 archive that cannot run fails here — and it is the only place
+      # Windows gets exercised at all, since neither Docker nor a Mac can do it.
+      - name: End to end — encode and decode in a real binary
+        shell: bash
+        run: |
+          cargo build --offline --release --workspace ${{ matrix.features }}
+          bin=target/release/opus-e2e
+          [ -f "$bin" ] || bin="$bin.exe"
+          "$bin"
+          ./check-static.sh "$bin"
 
       - name: Show what was built
         shell: bash
@@ -52,7 +113,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    # Only a tag publishes. A `workflow_dispatch` run is for looking at the logs.
+    # Only a tag publishes. A `workflow_dispatch` run is for testing a target.
     if: startsWith(github.ref, 'refs/tags/')
     needs: build
     runs-on: ubuntu-latest
@@ -64,7 +125,9 @@ jobs:
           path: artifacts
 
       # One archive per target, plus one checksum file over all of them. A consumer
-      # verifies what it downloaded against this rather than trusting the transfer.
+      # verifies what it downloaded against this rather than trusting the transfer —
+      # including crates/libopus-prebuilt-sys/build.rs, which checks a downloaded asset
+      # against the copy of these sums that `./sync-prebuilt.sh --pin` commits.
       - name: Package
         run: |
           mkdir -p dist
@@ -84,4 +147,11 @@ jobs:
           . ./opus.env
           gh release create "${{ github.ref_name }}" dist/* \
             --title "libopus ${OPUS_VERSION} (${{ github.ref_name }})" \
-            --notes "Static libopus ${OPUS_VERSION} for linux-x86_64, linux-aarch64, macos-arm64 and windows-x86_64-msvc, with SIMD verified at build time. See README.md for how to consume it."
+            --notes "Static libopus ${OPUS_VERSION} for macos-arm64, linux-x86_64, \
+          linux-aarch64 and windows-x86_64-msvc, with the SIMD paths and the CPU floor \
+          verified at build time. The x86_64 targets are built twice: once for a Coffee \
+          Lake floor (AVX2 unconditional) and once as \`-baseline\` (SSE2, with CPUID \
+          dispatch at runtime). See README.md.
+
+          Rust consumers: run \`./sync-prebuilt.sh --pin ${{ github.ref_name }}\`, commit \
+          the result, and depend on \`opus-prebuilt\` at that commit."
