@@ -19,7 +19,7 @@ One line, and no source changes:
 
 ```toml
 # was: opus = "0.3"
-opus = { package = "opus-prebuilt", git = "https://github.com/andrewtheguy/libopus-prebuilt", tag = "v1.6.1-20260731-731adf1" }
+opus = { package = "opus-prebuilt", git = "https://github.com/andrewtheguy/libopus-prebuilt", tag = "v1.6.1-20260731035112-731adf1" }
 ```
 
 (An example — use a tag that exists. See **Releasing** below for what the parts mean. The
@@ -261,13 +261,18 @@ so what gets released is what passed, run by the same code rather than a copy of
 gh workflow run release.yml     # or the Actions tab. No tag to type, nothing to commit after.
 ```
 
-Tags are computed, never typed: `v<opus version>-<YYYYMMDD>-<short sha>`, e.g.
-`v1.6.1-20260731-731adf1`. The version says what is inside, the UTC date says when, and the
-hash says which commit — and since the workflow derives all three from the tree it is
-building, none of them can disagree with it. That is also why there is nothing to validate:
-the failure mode of a hand-typed tag is a tag that lies, and the way to fix it is to stop
-typing tags. Releasing twice from one commit on one day is refused, because it would be the
-same tag.
+Tags are computed, never typed: `v<opus version>-<YYYYMMDDHHMMSS>-<short sha>`, e.g.
+`v1.6.1-20260731035112-731adf1`. The version says what is inside, the UTC timestamp says
+when, and the hash says which commit — and since the workflow derives all three from the
+tree it is building, none of them can disagree with it. That is also why there is nothing
+to validate: the failure mode of a hand-typed tag is a tag that lies, and the way to fix it
+is to stop typing tags.
+
+The timestamp runs to **seconds** so that tags sort into the order they were released.
+Dated to the day, two releases on one day were distinguished only by a commit hash, which
+has no order at all, so they listed arbitrarily. Releases before this change carry the
+older `-<YYYYMMDD>-` form and sort before everything after it, which is correct by
+accident: a shorter numeric field compares as smaller.
 
 The order is draft first, publish last, and the reason is worth knowing: **a draft release
 does not create the git tag.** Four builds, their tests, the e2e binaries, packaging and upload all happen while the tag still does not exist, and it

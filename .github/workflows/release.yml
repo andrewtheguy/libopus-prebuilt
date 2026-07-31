@@ -55,13 +55,19 @@ jobs:
             exit 1
           }
           # The build stamp, and the tag built from it — in that order, and both exported.
-          # The title wants "libopus 1.6.1 static archives - 20260731-f52df45", and deriving
-          # that by stripping the version back off the finished tag is how the first release
-          # came out titled with its version twice. Build the parts, then compose.
+          # The title wants "libopus 1.6.1 static archives - 20260731035112-f52df45", and
+          # deriving that by stripping the version back off the finished tag is how the
+          # first release came out titled with its version twice. Build the parts, then
+          # compose.
           #
-          # UTC, so the date does not depend on which timezone the person pressing the button
+          # Seconds, not just the date: two releases on one day sorted by neither their
+          # names nor anything else useful, because the only thing distinguishing them was a
+          # commit hash with no order to it. A full timestamp sorts lexicographically, which
+          # is the order they happened.
+          #
+          # UTC, so it does not depend on which timezone the person pressing the button
           # happens to be in.
-          stamp="$(date -u +%Y%m%d)-${GITHUB_SHA:0:7}"
+          stamp="$(date -u +%Y%m%d%H%M%S)-${GITHUB_SHA:0:7}"
           tag="v${OPUS_VERSION}-${stamp}"
           # Never `latest` off a branch: a release built from anything but the default
           # branch is a prerelease, exactly as in remotex.
@@ -74,11 +80,13 @@ jobs:
           echo "stamp=${stamp}" >> "$GITHUB_OUTPUT"
           echo "is_prerelease=${is_prerelease}" >> "$GITHUB_OUTPUT"
 
+      # Vestigial now that the stamp carries seconds — two runs of this workflow cannot
+      # collide unless they start in the same second on the same commit. Kept because it
+      # costs one request and the thing it guards against is a tag silently moving.
       - name: Abort if the tag already exists
         run: |
           if git ls-remote --tags origin "refs/tags/${{ steps.tag.outputs.tag }}" | grep -q .; then
-            echo "::error::Tag ${{ steps.tag.outputs.tag }} already exists. That means this \
-          exact commit was already released today — commit something, or release tomorrow."
+            echo "::error::Tag ${{ steps.tag.outputs.tag }} already exists."
             exit 1
           fi
 
