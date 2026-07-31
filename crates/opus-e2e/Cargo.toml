@@ -1,0 +1,15 @@
+[package]
+name = "opus-e2e"
+version.workspace = true
+edition = "2021"
+description = "End-to-end check: a real binary that encodes and decodes Opus"
+publish = false
+
+[features]
+x86-baseline = ["opus/x86-baseline"]
+
+[dependencies]
+# Written exactly the way a consuming project writes it, rename and all — so this
+# dependency line is itself part of what the pipeline tests. A project would use
+# `git = "…", tag = "…"` here instead of `path`.
+opus = { package = "opus-prebuilt", path = "../opus-prebuilt" }

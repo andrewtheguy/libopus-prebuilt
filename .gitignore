@@ -4,3 +4,11 @@
 build/
 dist/
 .DS_Store
+
+# The same rule, applied to the Rust half. `prebuilt/` is a cache: ./sync-prebuilt.sh
+# fills it from dist/, and failing that crates/libopus-prebuilt-sys/build.rs downloads
+# what it needs from the release. What *is* committed is prebuilt.sums — the checksum of
+# every release asset, which pins the bytes without storing them.
+crates/libopus-prebuilt-sys/prebuilt/
+target/
+Cargo.lock

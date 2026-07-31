@@ -1,0 +1,16 @@
+# The Rust half of this repository: a replacement for `opus` + `audiopus_sys` that links
+# the prebuilt archives built by ./build.sh instead of compiling opus with cmake.
+#
+# Two crates rather than one, for the same reason every -sys pair is split: the FFI and
+# the link flags are ours, the safe API is a fork of somebody else's crate and stays
+# recognisable as one. The third member is not a library at all — it is a consumer, built
+# and run by the pipeline on every target, because linking an archive into a binary that
+# executes is a different claim from compiling a test.
+[workspace]
+members = ["crates/libopus-prebuilt-sys", "crates/opus-prebuilt", "crates/opus-e2e"]
+resolver = "2"
+
+[workspace.package]
+# Not opus's version — that is in opus.env, and a consumer pins this by git tag anyway.
+# This number moves when the *crates* change shape.
+version = "0.1.0"

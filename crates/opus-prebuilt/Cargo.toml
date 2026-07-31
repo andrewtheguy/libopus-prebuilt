@@ -1,0 +1,29 @@
+[package]
+name = "opus-prebuilt"
+version.workspace = true
+# 2015, matching upstream `opus` 0.3.1. src/lib.rs is that crate's source with one line
+# changed, and an edition is part of what a source file means — bumping it here would be
+# a second change, in the file whose whole value is being unchanged.
+edition = "2015"
+rust-version = "1.70"
+description = "Safe Rust bindings for libopus, linked from a prebuilt static archive"
+# Both, as upstream: this crate is a fork of `opus` 0.3.1 by Tad Hardesty, and src/lib.rs
+# is that crate's source with one line changed. See the note at the top of src/lib.rs.
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/andrewtheguy/libopus-prebuilt"
+publish = false
+
+[lib]
+# `opus`, not `opus_prebuilt`. This is what makes the swap a one-line change for a
+# consumer: with `opus = { package = "opus-prebuilt", … }` in their manifest, every
+# `use opus::…` and `opus::Decoder::new` in their source keeps compiling untouched.
+name = "opus"
+path = "src/lib.rs"
+
+[features]
+# Passed straight through, so a consumer selects the CPU floor from their own manifest
+# without naming the -sys crate.
+x86-baseline = ["libopus-prebuilt-sys/x86-baseline"]
+
+[dependencies]
+libopus-prebuilt-sys = { path = "../libopus-prebuilt-sys" }
