@@ -1,13 +1,17 @@
 name: Build libopus
 
-# Manual, and on a tag. There is nothing to build on a push: the source is a pinned
-# tarball and the flags are in `build.sh`, so a run's output only changes when one of
-# those does — which is a commit somebody makes deliberately, followed by a tag.
+# Build every archive and test it. This workflow never publishes — releasing is
+# release.yml, which calls this one and then does the publishing part. Two triggers
+# instead of one, so that "does it build and pass" can be asked at any time without
+# anybody being committed to a release by asking.
 #
-# The manual trigger is not only for reading logs. Windows is the one target that cannot
-# be built or tested anywhere else here — Docker covers Linux (`./test-docker.sh`) and a
-# Mac covers itself — so `workflow_dispatch` with `targets: windows` *is* the Windows test
-# loop, and it is meant to be used before tagging rather than after.
+# `workflow_dispatch` is the test loop, and Windows is why it matters: it is the one target
+# that cannot be built or tested anywhere else here — Docker covers Linux
+# (`./test-docker.sh`) and a Mac covers itself — so `targets: windows` is how the MSVC
+# archive gets exercised at all.
+#
+# `workflow_call` is release.yml. A failure anywhere in here — a build, a test, the e2e
+# binary, the CPU-floor comparison — fails the caller's job and the release never happens.
 on:
   workflow_dispatch:
     inputs:
@@ -16,11 +20,17 @@ on:
         type: choice
         default: all
         options: [all, windows, x86_64, arm64]
-  push:
-    tags: ["v*"]
+  workflow_call:
+    inputs:
+      targets:
+        description: "which targets to build and test"
+        type: string
+        default: all
 
+# Read-only. The token that can create a release belongs to the job that creates one, and
+# that job is in the other file.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   plan:
@@ -33,49 +43,6 @@ jobs:
       # That the committed headers are the pinned opus's, and that src/consts.rs is what
       # those headers say. Cheap, and it runs before six compilers do.
       - run: ./sync-prebuilt.sh --check
-
-      # `v<opus>-<YYYYMMDD>-<short sha>`: the version says what is inside, the date says
-      # when, and the hash says *which commit* — because this repository releases for
-      # reasons that have nothing to do with opus (a change to the Rust crates, a new CPU
-      # floor, a rebuilt archive), and those need a tag of their own rather than an argument
-      # about re-tagging v1.6.1.
-      #
-      # A hash rather than a counter for one reason: nobody has to remember what number
-      # they are on, and unlike a counter it can be *checked* — which is the next few lines.
-      # Both halves are worth refusing a tag over:
-      #
-      #   the version, because every asset filename is built from OPUS_VERSION, so
-      #   `v1.6.0-…` against a 1.6.1 pin publishes correctly-built archives under a version
-      #   they are not, and `--pin` writes that into a consumer's prebuilt.sums as a URL
-      #   that does not match the bytes it names;
-      #
-      #   the hash, because a tag naming a commit other than the one being built is worse
-      #   than a tag naming no commit at all — it is provenance that reads as trustworthy
-      #   and is not.
-      - name: Check the tag names this opus and this commit
-        if: github.ref_type == 'tag'
-        run: |
-          . ./opus.env
-          tag="${{ github.ref_name }}"
-          version_re="$(printf '%s' "$OPUS_VERSION" | sed 's/\./\\./g')"
-          echo "$tag" | grep -Eq "^v${version_re}-[0-9]{8}-[0-9a-f]{7,40}$" || {
-            echo "tag $tag is not v${OPUS_VERSION}-<YYYYMMDD>-<short sha>" >&2
-            echo "opus.env pins $OPUS_VERSION, and every asset is named for it. Tag with:" >&2
-            echo "  git tag v${OPUS_VERSION}-\$(date +%Y%m%d)-\$(git rev-parse --short HEAD)" >&2
-            exit 1
-          }
-
-          # Compared as a prefix of the full SHA rather than against `git rev-parse --short`:
-          # git chooses an abbreviation length from the object count, so the length here need
-          # not match the length on the machine that made the tag.
-          short="${tag##*-}"
-          case "$GITHUB_SHA" in
-            "$short"*) echo "$tag names opus $OPUS_VERSION at $GITHUB_SHA" ;;
-            *)
-              echo "tag $tag says commit $short but this run is building $GITHUB_SHA" >&2
-              exit 1
-              ;;
-          esac
 
       # The matrix, narrowed here as *data* rather than by a job-level `if`. Two reasons,
       # one hard and one practical: a job-level condition cannot reference `matrix` at all
@@ -96,9 +63,6 @@ jobs:
             {"target":"windows-x86_64-msvc",         "runs-on":"windows-latest", "group":"windows", "features":""},
             {"target":"windows-x86_64-msvc-baseline","runs-on":"windows-latest", "group":"windows", "features":"--features opus-prebuilt/x86-baseline"}
           ]'
-          # A tag always builds everything: a release missing an asset is a build failure
-          # for whoever needs that target, discovered later and by somebody else.
-          [ "${{ github.event_name }}" = workflow_dispatch ] || GROUP=all
           targets="$(jq -c --arg g "$GROUP" '[.[] | select($g == "all" or .group == $g)]' <<<"$all")"
           echo "$targets" | jq -r '.[].target' | sed 's/^/  /'
           echo "targets=$targets" >> "$GITHUB_OUTPUT"
@@ -237,51 +201,3 @@ jobs:
           echo
           echo "$compared floor pair(s) compared"
           exit $status
-
-  release:
-    # Only a tag publishes. A `workflow_dispatch` run is for testing a target.
-    if: startsWith(github.ref, 'refs/tags/')
-    needs: [build, floors]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      # One archive per target, plus one checksum file over all of them. A consumer
-      # verifies what it downloaded against this rather than trusting the transfer —
-      # including crates/libopus-prebuilt-sys/build.rs, which checks a downloaded asset
-      # against the copy of these sums that `./sync-prebuilt.sh --pin` commits.
-      - name: Package
-        run: |
-          mkdir -p dist
-          . ./opus.env
-          for dir in artifacts/libopus-*; do
-            target="${dir#artifacts/libopus-}"
-            tar czf "dist/libopus-${OPUS_VERSION}-${target}.tar.gz" -C "$dir" .
-          done
-          cd dist
-          sha256sum ./*.tar.gz > SHA256SUMS
-          cat SHA256SUMS
-
-      - name: Publish
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          . ./opus.env
-          # The build stamp is whatever the tag says after the version, so the title reads
-          # "libopus 1.6.1 static archives - 20260730-1" and two releases of the same opus
-          # are told apart at a glance in the release list.
-          stamp="${GITHUB_REF_NAME#v${OPUS_VERSION}-}"
-          gh release create "${{ github.ref_name }}" dist/* \
-            --title "libopus ${OPUS_VERSION} static archives - ${stamp}" \
-            --notes "Static libopus ${OPUS_VERSION} for macos-arm64, linux-x86_64, \
-          linux-aarch64 and windows-x86_64-msvc, with the SIMD paths and the CPU floor \
-          verified at build time. The x86_64 targets are built twice: once for a Coffee \
-          Lake floor (AVX2 unconditional) and once as \`-baseline\` (SSE2, with CPUID \
-          dispatch at runtime). See README.md.
-
-          Rust consumers: run \`./sync-prebuilt.sh --pin ${{ github.ref_name }}\`, commit \
-          the result, and depend on \`opus-prebuilt\` at that commit."

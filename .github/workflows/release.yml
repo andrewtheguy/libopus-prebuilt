@@ -1,0 +1,214 @@
+name: Release libopus archives
+
+# Manual, and separate from build.yml on purpose: "does this build and pass" is a question
+# worth asking at any time, and it should not require being committed to a release to ask
+# it. This workflow answers the other question, and it answers it by *calling* build.yml
+# rather than repeating it — so the archives that get published are the ones that passed
+# the same tests, run by the same code, and a failure anywhere in there means no release.
+#
+# Draft first, publish last, following remotex's release.yml. The property that buys:
+# **a draft release does not create the git tag.** Everything — six builds, their tests,
+# the e2e binaries, the CPU-floor comparison, packaging, upload — happens while the tag
+# still does not exist, and the tag appears only when the draft is published at the very
+# end. A failed release leaves a deletable draft rather than a tag pointing at archives
+# nobody should link.
+#
+# The tag is *computed*, never typed: `v<opus>-<YYYYMMDD>-<short sha>`. The version says
+# what is inside, the date says when, and the hash says which commit — and because this
+# job derives all three from the tree it is building, none of them can disagree with it.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
+      tag: ${{ steps.tag.outputs.tag }}
+      is_prerelease: ${{ steps.tag.outputs.is_prerelease }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Determine the tag
+        id: tag
+        run: |
+          . ./opus.env
+          # opus.env is hand-edited, and every asset filename is built from this value, so
+          # a typo here becomes a release full of misnamed archives and a `--pin` that
+          # writes the typo into a consumer's prebuilt.sums.
+          echo "$OPUS_VERSION" | grep -Eq '^[0-9]+\.[0-9]+(\.[0-9]+)?$' || {
+            echo "::error::OPUS_VERSION in opus.env is not a version: '$OPUS_VERSION'"
+            exit 1
+          }
+          # `$GITHUB_SHA` rather than `git rev-parse --short HEAD`: it is the commit this run
+          # is building, by definition, and it needs neither a .git directory nor a checkout
+          # deep enough to have one. Shelling out to git here failed silently in testing and
+          # produced a tag ending in nothing at all — an empty hash reads as a typo in the
+          # tag rather than as the bug it is.
+          [ ${#GITHUB_SHA} -eq 40 ] || {
+            echo "::error::GITHUB_SHA is not a full sha: '$GITHUB_SHA'"
+            exit 1
+          }
+          # UTC, so the date does not depend on which timezone the person pressing the
+          # button happens to be in.
+          tag="v${OPUS_VERSION}-$(date -u +%Y%m%d)-${GITHUB_SHA:0:7}"
+          # Never `latest` off a branch: a release built from anything but the default
+          # branch is a prerelease, exactly as in remotex.
+          is_prerelease=false
+          [ "$GITHUB_REF_NAME" = "${{ github.event.repository.default_branch }}" ] || is_prerelease=true
+
+          echo "releasing $tag from $GITHUB_REF_NAME (prerelease=$is_prerelease)"
+          echo "version=${OPUS_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "is_prerelease=${is_prerelease}" >> "$GITHUB_OUTPUT"
+
+      - name: Abort if the tag already exists
+        run: |
+          if git ls-remote --tags origin "refs/tags/${{ steps.tag.outputs.tag }}" | grep -q .; then
+            echo "::error::Tag ${{ steps.tag.outputs.tag }} already exists. That means this \
+          exact commit was already released today — commit something, or release tomorrow."
+            exit 1
+          fi
+
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # A leftover draft from a failed run is the only thing that can collide, since a
+          # draft never created a tag for the check above to have found.
+          if gh release view "${{ steps.tag.outputs.tag }}" --json isDraft --jq '.isDraft' 2>/dev/null | grep -qx true; then
+            echo "Deleting stale draft ${{ steps.tag.outputs.tag }}"
+            gh release delete "${{ steps.tag.outputs.tag }}" --yes
+          fi
+          gh release create "${{ steps.tag.outputs.tag }}" \
+            --draft \
+            --target "${{ github.sha }}" \
+            --title "libopus ${{ steps.tag.outputs.version }} static archives - ${{ steps.tag.outputs.tag }}" \
+            --generate-notes \
+            ${{ steps.tag.outputs.is_prerelease == 'true' && '--prerelease' || '' }}
+
+  # Every target, built and tested by the same workflow the manual test loop uses. Not a
+  # copy of it — the same file.
+  ci:
+    needs: prepare
+    uses: ./.github/workflows/build.yml
+    with:
+      targets: all
+
+  publish:
+    needs: [prepare, ci]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # No `merge-multiple`: each target's artifact is a *tree* (lib/, include/, MANIFEST)
+      # and they must stay in separate directories to be packaged separately. The pattern
+      # also leaves the digest-* artifacts alone, which are collected below.
+      - name: Download the archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: libopus-*
+          path: artifacts
+
+      - name: Download the encoder digests
+        uses: actions/download-artifact@v4
+        with:
+          pattern: digest-*
+          path: digests
+
+      - name: Package
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          mkdir -p dist
+          # Named here rather than discovered, so that a target silently missing from the
+          # matrix is a failed release instead of a release somebody links against six
+          # months later and finds nothing for their platform.
+          expected="macos-arm64 linux-x86_64 linux-x86_64-baseline linux-aarch64
+                    windows-x86_64-msvc windows-x86_64-msvc-baseline"
+          for target in $expected; do
+            dir="artifacts/libopus-$target"
+            [ -f "$dir/MANIFEST" ] || {
+              echo "::error::no archive for $target — refusing to publish an incomplete release"
+              exit 1
+            }
+            tar czf "dist/libopus-${VERSION}-${target}.tar.gz" -C "$dir" .
+          done
+
+          # One checksum file over all of them. This is what a consumer's build verifies a
+          # download against — `./sync-prebuilt.sh --pin` copies it into prebuilt.sums, and
+          # crates/libopus-prebuilt-sys/build.rs checks it before unpacking anything.
+          cd dist
+          sha256sum ./*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Collect the encoder digests
+        run: |
+          # Provenance for anyone keeping Opus fixtures: what each archive's encoder
+          # produced for a fixed input. The floors job already asserted that the two
+          # archives per platform agree; this records the values themselves, so a future
+          # release can be compared against this one without re-running anything.
+          {
+            for dir in digests/digest-*; do
+              echo "[${dir#digests/digest-}]"
+              sed 's/^/  /' "$dir/digest.txt"
+            done
+          } | tee dist/ENCODER-DIGESTS
+
+      - name: Upload the assets to the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release upload "${{ needs.prepare.outputs.tag }}" \
+            dist/*.tar.gz dist/SHA256SUMS dist/ENCODER-DIGESTS --clobber
+
+      - name: Add the consumer notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          # Appended to the generated commit list rather than replacing it: the commits say
+          # what changed, and this says what to do about it. Anyone arriving at this release
+          # wants the second thing and will not find it in a diff.
+          gh release view "$TAG" --json body --jq '.body' > notes.md
+          cat >> notes.md <<EOF
+
+          ---
+
+          ## Using these from Rust
+
+          \`\`\`toml
+          opus = { package = "opus-prebuilt", git = "https://github.com/${GITHUB_REPOSITORY}", tag = "${TAG}" }
+          \`\`\`
+
+          Then, in this repository, \`./sync-prebuilt.sh --pin ${TAG}\` and commit the
+          result — that is what lets a consumer's build download and verify an archive.
+
+          ## CPU floors
+
+          The \`x86_64\` archives require **AVX2 (Coffee Lake or newer)** and call opus's
+          SSE4.1 and AVX2 kernels with the CPUID dispatch compiled out. For anything older —
+          including the Celeron and Pentium parts of that same generation, where AVX2 is
+          fused off — add \`features = ["x86-baseline"]\` to get the \`-baseline\` archive.
+          \`macos-arm64\` is built for \`apple-m1\`, which every arm64 Mac satisfies.
+
+          \`SHA256SUMS\` covers every asset. \`ENCODER-DIGESTS\` records what each archive's
+          encoder produced for a fixed input, for projects with checked-in Opus fixtures.
+          EOF
+          gh release edit "$TAG" --notes-file notes.md
+
+      # Last, and only now does the git tag come into existence.
+      - name: Publish (removes the draft, creates the tag)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release edit "${{ needs.prepare.outputs.tag }}" --draft=false
+          echo "published ${{ needs.prepare.outputs.tag }}"
+          echo "next: ./sync-prebuilt.sh --pin ${{ needs.prepare.outputs.tag }} && git commit"
