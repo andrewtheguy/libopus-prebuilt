@@ -111,6 +111,17 @@ script. Note what this route still requires and the crate route does not: three 
 set correctly in every Dockerfile, packaging script and CI job, and `audiopus_sys` present
 in the dependency tree — which is cmake in the tree, whether or not it gets used.
 
+### Something to listen to
+
+[`wav-demo/`](wav-demo/) is a standalone project that takes the crate from git by tag, the
+way a real consumer does, and encodes a WAV to playable `.opus` files at several bitrates —
+plus the decode and the *difference* between them, so you can hear what the codec discarded.
+It is a sample and nothing in CI builds it; its pinned tag is deliberately left to go stale.
+
+```sh
+cd wav-demo && cargo run --release      # synthesises a clip if you give it no input
+```
+
 ## Why this exists
 
 Every Rust project using `opus` pulls `audiopus_sys`, which builds a **vendored copy of

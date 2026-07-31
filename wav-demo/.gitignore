@@ -1,0 +1,25 @@
+# Everything this demo produces. `out/` is where the program writes, and it fills up fast:
+# one original, one decode and one difference file per bitrate, uncompressed, so a single
+# 10 s stereo run is about 13 MB.
+out/
+
+# Stray audio anywhere else, in case someone runs the binary from a different directory or
+# drops a test file in here to try it. None of it belongs in git — the point of the demo is
+# that it regenerates its own input.
+*.wav
+*.opus
+*.ogg
+*.raw
+*.pcm
+
+# Rust build output.
+target/
+**/*.rs.bk
+
+# Cargo.lock is not committed, matching the rest of this repository. This is a sample rather
+# than something anybody deploys, its one dependency is pinned by git tag already, and a
+# lockfile here would only add a second place where that tag is written down.
+Cargo.lock
+
+# macOS.
+.DS_Store
