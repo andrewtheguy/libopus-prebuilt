@@ -19,6 +19,9 @@
 //! Every check reports, and the exit code is the verdict. Failures do not stop the run,
 //! because in CI the whole report is more useful than the first line of it.
 
+mod metrics;
+mod signals;
+
 use opus::{Application, Bitrate, Channels, Decoder, Encoder};
 use std::process::ExitCode;
 
@@ -133,6 +136,165 @@ fn round_trip(report: &mut Report, rate: u32, channels: Channels, mode: Applicat
     println!("       {} packets, {}..{} bytes, output/input RMS {ratio:.3}",
              sizes.len(), sizes.iter().min().unwrap(), sizes.iter().max().unwrap());
     report.check(&format!("{label}: signal survives the round trip"), ratio > 0.5 && ratio < 2.0);
+}
+
+// ---------- fidelity ----------
+//
+// Does audio survive the round trip, and does the decoder agree with the encoder?
+//
+// Two questions, and only the second has an exact answer. `OPUS_GET_FINAL_RANGE` returns
+// the entropy coder's end state, and libopus's own test suite uses it the same way: if the
+// decoder's matches the encoder's for a packet, the decoder walked an identical path
+// through that packet's range coder. It is exact, cheap, and valid across platforms — a
+// far stronger claim than any digest of the bitstream, which would differ between the AVX2
+// and NEON archives for reasons that are not bugs. So that one is a hard assert.
+//
+// The first question can only be answered approximately, because the codec is lossy by
+// design. See metrics.rs for why there are three measures and signals.rs for why the
+// correlation floor travels with the signal.
+
+/// One (rate, channels, application, bitrate) the consuming projects plausibly use.
+struct Config {
+    rate: u32,
+    channels: Channels,
+    app: Application,
+    kbps: i32,
+}
+
+const CONFIGS: [Config; 4] = [
+    // What both consuming projects actually run.
+    Config { rate: 48_000, channels: Channels::Stereo, app: Application::Audio, kbps: 64 },
+    Config { rate: 48_000, channels: Channels::Mono, app: Application::Audio, kbps: 128 },
+    // Down into SILK, where a different set of kernels does the work.
+    Config { rate: 16_000, channels: Channels::Mono, app: Application::Voip, kbps: 32 },
+    Config { rate: 8_000, channels: Channels::Mono, app: Application::Voip, kbps: 24 },
+];
+
+/// Encode and decode one signal, returning the decode aligned with the input and whether
+/// every packet's final range agreed.
+fn fidelity_round_trip(mono: &[f64], cfg: &Config) -> Result<Trip, opus::Error> {
+    let nch = if cfg.channels == Channels::Stereo { 2 } else { 1 };
+    let frame = cfg.rate as usize / 1000 * FRAME_MS;
+
+    let mut enc = Encoder::new(cfg.rate, cfg.channels, cfg.app)?;
+    enc.set_bitrate(Bitrate::Bits(cfg.kbps * 1000))?;
+    enc.set_complexity(10)?;
+    let lookahead = enc.get_lookahead()? as usize;
+    let mut dec = Decoder::new(cfg.rate, cfg.channels)?;
+
+    // Interleave. The right channel is the left delayed and mixed, which is what makes
+    // stereo worth testing: identical channels would never exercise coupling.
+    let mut input: Vec<i16> = Vec::with_capacity(mono.len() * nch);
+    for (i, &v) in mono.iter().enumerate() {
+        input.push(v.clamp(-32768.0, 32767.0) as i16);
+        if nch == 2 {
+            let r = v * 0.8 + mono[i.saturating_sub(97)] * 0.2;
+            input.push(r.clamp(-32768.0, 32767.0) as i16);
+        }
+    }
+    while input.len() % (frame * nch) != 0 {
+        input.push(0);
+    }
+
+    let mut decoded: Vec<i16> = Vec::with_capacity(input.len());
+    let mut buf = vec![0i16; frame * nch];
+    let mut ranges_agree = true;
+    let mut frames = 0usize;
+
+    for chunk in input.chunks_exact(frame * nch) {
+        let packet = enc.encode_vec(chunk, 4000)?;
+        let got = dec.decode(&packet, &mut buf, false)?;
+        decoded.extend_from_slice(&buf[..got * nch]);
+        ranges_agree &= enc.get_final_range()? == dec.get_final_range()?;
+        frames += 1;
+    }
+
+    // Channel 0, undelayed — the caller aligns, because the offset depends on which
+    // internal mode Opus chose and that depends on the signal.
+    let left: Vec<f64> = decoded.iter().step_by(nch).map(|&s| s as f64).collect();
+    Ok(Trip { decoded: left, ranges_agree, frames, lookahead })
+}
+
+struct Trip {
+    decoded: Vec<f64>,
+    ranges_agree: bool,
+    frames: usize,
+    lookahead: usize,
+}
+
+fn fidelity_checks(report: &mut Report) {
+    println!("\nfidelity  (band error is the gate; SNR is reported, not asserted)");
+    let mut total_frames = 0usize;
+    let mut range_failures = 0usize;
+
+    for cfg in &CONFIGS {
+        let nch = if cfg.channels == Channels::Stereo { 2 } else { 1 };
+        let label = format!(
+            "{} kHz {} @{}k",
+            cfg.rate / 1000,
+            if nch == 2 { "stereo" } else { "mono" },
+            cfg.kbps
+        );
+        println!("  {label}");
+
+        // One second. Long enough for the encoder to settle and for the FFT to have a full
+        // window at every rate; short enough that this stays quick under valgrind.
+        for signal in signals::all(cfg.rate, cfg.rate as usize) {
+            let trip = match fidelity_round_trip(&signal.samples, cfg) {
+                Ok(v) => v,
+                Err(e) => {
+                    report.check(&format!("{label} {}: round trip ({e})", signal.name), false);
+                    continue;
+                }
+            };
+            total_frames += trip.frames;
+            if !trip.ranges_agree {
+                range_failures += 1;
+            }
+
+            let delay = metrics::best_delay(&signal.samples, &trip.decoded, trip.lookahead, 200);
+            let aligned: Vec<f64> =
+                trip.decoded.iter().skip(delay).take(signal.samples.len()).copied().collect();
+            let reference = &signal.samples[..aligned.len()];
+
+            let corr = metrics::correlation(reference, &aligned);
+            let band = metrics::max_band_error_db(reference, &aligned, cfg.rate);
+            let snr = metrics::snr_db(reference, &aligned);
+            println!(
+                "    {:<7} corr {:>6.4} (floor {:.2})   band {:>4.1} dB   snr {:>5.1} dB   \
+                 delay {delay} (lookahead {})",
+                signal.name, corr, signal.corr_floor, band, snr, trip.lookahead
+            );
+
+            // Noise is aperiodic, so its alignment is unambiguous — no period for the
+            // search to slip by. That makes it, and only it, a fair test of whether the
+            // encoder's reported lookahead is the real delay. `wav-demo` trims by that
+            // number to line its output up with the input, so it is worth knowing.
+            if signal.name == "noise" {
+                let off = (delay as i64 - trip.lookahead as i64).abs();
+                report.check(
+                    &format!("{label}: reported lookahead is the real delay (off by {off})"),
+                    off <= 2,
+                );
+            }
+
+            report.check(
+                &format!("{label} {}: spectrum survives (band error <= 6 dB)", signal.name),
+                band <= 6.0,
+            );
+            report.check(
+                &format!("{label} {}: waveform survives (corr >= {})", signal.name, signal.corr_floor),
+                corr >= signal.corr_floor,
+            );
+        }
+    }
+
+    // The exact one, aggregated: every packet across every configuration.
+    println!("  final range: {} configurations, {total_frames} packets", CONFIGS.len() * 4);
+    report.check(
+        "encoder and decoder agree on the final range for every packet",
+        range_failures == 0,
+    );
 }
 
 // ---------- memory ----------
@@ -308,6 +470,7 @@ fn main() -> ExitCode {
         Err(e) => report.check(&format!("repacketizer ({e})"), false),
     }
 
+    fidelity_checks(&mut report);
     memory_checks(&mut report);
 
     println!();
