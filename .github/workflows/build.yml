@@ -34,6 +34,28 @@ jobs:
       # those headers say. Cheap, and it runs before six compilers do.
       - run: ./sync-prebuilt.sh --check
 
+      # `v<opus>-<YYYYMMDD>-<n>`: the opus version says what is inside, and the date and
+      # counter say which build it was — because this repository releases for reasons that
+      # have nothing to do with opus (a change to the Rust crates, a new CPU floor) and
+      # those need a tag of their own rather than an argument about reusing v1.6.1.
+      #
+      # Checked here, before six compilers run, because every asset filename is built from
+      # OPUS_VERSION: a tag that disagrees publishes correctly-built archives under a
+      # version they are not, and `--pin` then writes that disagreement into a consumer's
+      # prebuilt.sums.
+      - name: Check the tag names this opus
+        if: github.ref_type == 'tag'
+        run: |
+          . ./opus.env
+          version_re="$(printf '%s' "$OPUS_VERSION" | sed 's/\./\\./g')"
+          if echo "${{ github.ref_name }}" | grep -Eq "^v${version_re}-[0-9]{8}-[0-9]+$"; then
+            echo "${{ github.ref_name }} names opus $OPUS_VERSION"
+          else
+            echo "tag ${{ github.ref_name }} is not v${OPUS_VERSION}-<YYYYMMDD>-<n>" >&2
+            echo "opus.env pins $OPUS_VERSION, and every asset is named for it." >&2
+            exit 1
+          fi
+
       # The matrix, narrowed here as *data* rather than by a job-level `if`. Two reasons,
       # one hard and one practical: a job-level condition cannot reference `matrix` at all
       # — GitHub rejects the workflow outright — and filtering before the fan-out means a
@@ -228,8 +250,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           . ./opus.env
+          # The build stamp is whatever the tag says after the version, so the title reads
+          # "libopus 1.6.1 static archives - 20260730-1" and two releases of the same opus
+          # are told apart at a glance in the release list.
+          stamp="${GITHUB_REF_NAME#v${OPUS_VERSION}-}"
           gh release create "${{ github.ref_name }}" dist/* \
-            --title "libopus ${OPUS_VERSION} (${{ github.ref_name }})" \
+            --title "libopus ${OPUS_VERSION} static archives - ${stamp}" \
             --notes "Static libopus ${OPUS_VERSION} for macos-arm64, linux-x86_64, \
           linux-aarch64 and windows-x86_64-msvc, with the SIMD paths and the CPU floor \
           verified at build time. The x86_64 targets are built twice: once for a Coffee \

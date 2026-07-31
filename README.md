@@ -18,11 +18,11 @@ One line, and no source changes:
 
 ```toml
 # was: opus = "0.3"
-opus = { package = "opus-prebuilt", git = "https://github.com/andrewtheguy/libopus-prebuilt", tag = "v1.6.1-1" }
+opus = { package = "opus-prebuilt", git = "https://github.com/andrewtheguy/libopus-prebuilt", tag = "v1.6.1-20260730-1" }
 ```
 
-(`v1.6.1-1` is an example — use a tag that exists. See **Releasing** below: no tag is
-pinned until the first release is published and `--pin`ned.)
+(An example — use a tag that exists. See **Releasing** below for what the parts mean, and
+note that no tag is pinned until the first release is published and `--pin`ned.)
 
 `opus-prebuilt` sets `[lib] name = "opus"`, so every `use opus::…` and
 `opus::Decoder::new` keeps compiling untouched. No cmake, no C compiler, no pkg-config,
@@ -241,10 +241,23 @@ Not opus versions — the pin only moves when you move it. These:
 
 ## Releasing
 
+Tags are `v<opus version>-<YYYYMMDD>-<n>`:
+
 ```sh
-git tag v1.6.1-1 && git push --tags   # CI builds all six targets and publishes them
-./sync-prebuilt.sh --pin v1.6.1-1     # commit the checksums consumers verify against
+git tag v1.6.1-20260730-1 && git push --tags   # CI builds all six targets and publishes
+./sync-prebuilt.sh --pin v1.6.1-20260730-1     # commit the checksums consumers verify
 ```
+
+The version says what is inside; the date and counter say which build it was. That
+separation is the point: this repository has reasons to release that have nothing to do
+with opus — a change to the Rust crates, a new CPU floor, a rebuilt archive — and each
+needs a tag of its own rather than an argument about re-tagging `v1.6.1`. The counter
+increments for a second release on the same day (`…-20260730-2`).
+
+The `plan` job rejects a tag whose version disagrees with `opus.env`, because every asset
+filename is built from `OPUS_VERSION`: `v1.6.0-…` against a 1.6.1 pin would publish
+correctly-built archives under a version they are not, and `--pin` would then write that
+disagreement into a consumer's `prebuilt.sums`.
 
 The order matters: `--pin` reads the release's own `SHA256SUMS`, so the release has to
 exist first. Until a tag is pinned, `prebuilt.sums` has no entry for a target and a
