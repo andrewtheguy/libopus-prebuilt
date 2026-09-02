@@ -123,14 +123,13 @@ for entry in "${targets[@]}"; do
     code=$?
     status=1
     echo "--- $target FAILED (exit $code)" >&2
-    # emulation: 132 is SIGILL. On Apple silicon with Rosetta handling linux/amd64,
-    # AVX2 is unimplemented, so the *correctly built* Coffee Lake archive dies here
-    # while the baseline one passes. That is the emulator's limit, not a bad artifact —
-    # confirm on a real x86_64 machine, or in the GitHub Actions run, before chasing it.
+    # 132 is SIGILL. The x86_64 archive dispatches by CPUID, and Rosetta (Apple silicon
+    # running linux/amd64) reports no AVX2, so the SSE4.1 kernels are what runs there and
+    # a SIGILL is a real defect — an AVX2 or FMA instruction that escaped the kernels —
+    # not an emulator limit. build.sh's floor check is what should have caught it.
     if [ "$code" = 132 ] && [ "$platform" = linux/amd64 ]; then
-      echo "    SIGILL under emulation. If $target is the AVX2 build, the emulator is" >&2
-      echo "    the likely cause: Rosetta does not implement AVX2. Disable 'Use Rosetta" >&2
-      echo "    for x86/amd64' in Docker Desktop to fall back to QEMU, which does." >&2
+      echo "    SIGILL: an instruction outside the dispatched kernels. Run" >&2
+      echo "    ./build.sh $target and read its 'verifying the CPU floor' step." >&2
     fi
   fi
 done

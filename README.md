@@ -6,12 +6,13 @@ cmake at all — plus a Rust crate that replaces `opus` + `audiopus_sys` and lin
 | target | library | CPU floor |
 |---|---|---|
 | `macos-arm64` | `libopus.a` | `apple-m1`, deployment target 11.0 |
-| `linux-x86_64` | `libopus.a` | **x86-64-v3 / Coffee Lake** — AVX2+FMA unconditional |
+| `linux-x86_64` | `libopus.a` | x86-64 baseline — SSE4.1/AVX2 kernels dispatched by CPUID |
 | `linux-aarch64` | `libopus.a` | ARMv8-A, NEON unconditional |
-| `windows-x86_64-msvc` | `opus.lib` | **`/arch:AVX2` / Coffee Lake**, dynamic CRT |
+| `windows-x86_64-msvc` | `opus.lib` | x86-64 baseline, dispatched the same way; dynamic CRT |
 
-Every one of them compiles out opus's runtime CPU dispatch and calls the SIMD kernels
-unconditionally, because every one names a floor that guarantees them.
+The arm archives call NEON unconditionally, because ARMv8-A guarantees it. The x86_64
+archives keep opus's runtime CPUID dispatch, so one archive runs on any x86-64 and still
+uses the AVX2 kernels where the CPU has them.
 
 ## Using it from Rust
 
@@ -45,16 +46,17 @@ line again.
 
 ### CPU floors
 
-The x86_64 archives assume **Coffee Lake or newer** and call opus's SSE4.1 and AVX2
-kernels unconditionally, with the runtime CPUID dispatch compiled out. Stated plainly, the
-cost is that they execute an illegal instruction on anything without AVX2: pre-2013 Intel,
-pre-Zen AMD, and — the one that surprises people — the Celeron and Pentium parts *of* the
-Coffee Lake generation, where AVX2 is fused off.
+The x86_64 archives have no floor above the x86-64 baseline. opus compiles its SSE4.1 and
+AVX2 kernels per file with that file's own flags and selects them through
+`opus_select_arch()` at run time (`OPUS_X86_MAY_HAVE_*`, the upstream default), so a
+Coffee Lake runs the AVX2 NSQ and pitch kernels and an Ivy Bridge runs the SSE4.1 ones.
+`build.sh` asserts both halves of that: the dispatcher is in the archive, and no AVX2 or
+FMA instruction exists outside a function named `*_avx2`.
 
-That is the floor this repository was asked for, and there is deliberately no fallback
-archive for anything below it. A dispatching build would be a second artifact to build,
-test, release and reason about in order to serve machines nobody here targets; a project
-that needs one should build its own libopus and point `LIBOPUS_PREBUILT_DIR` at it.
+What a `-march=x86-64-v3` floor added on top was measured before it was dropped: the
+scalar code autovectorized, and 60 s of 48 kHz stereo encoded in 0.65% of a core instead
+of 0.73%. That is the whole price of one archive that runs everywhere, and the consuming
+projects pay it rather than build, test and release a second one.
 
 macOS needs no such choice. Every arm64 Mac is an M1 or later, so naming the M1 as the
 floor costs no compatibility at all and buys ARMv8.4 with dotprod and fp16 over the
@@ -150,8 +152,8 @@ had: a named CPU floor, and **SIMD paths that are asserted rather than assumed**
 >> verifying the SIMD objects made it in
    17 neon symbol references
 >> verifying the CPU floor
-   1722 AVX2/FMA instructions
-   floor: x86-64-v3 / Coffee Lake (AVX2+FMA unconditional)
+   133 AVX2/FMA instructions, all inside _avx2 kernels
+   floor: x86-64 baseline (SSE4.1 and AVX2 kernels dispatched at run time)
 ```
 
 - **The SIMD paths.** opus's cmake detects the architecture, compiles the intrinsics it
