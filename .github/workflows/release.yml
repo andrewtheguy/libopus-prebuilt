@@ -197,13 +197,11 @@ jobs:
 
           ## CPU floors
 
-          The \`x86_64\` archives require **AVX2 (Coffee Lake or newer)** and call opus's
-          SSE4.1 and AVX2 kernels with the CPUID dispatch compiled out, so they execute an
-          illegal instruction on anything older — including the Celeron and Pentium parts of
-          that same generation, where AVX2 is fused off. That floor is deliberate and there
-          is no fallback archive; a project that needs one should build its own libopus and
-          point \`LIBOPUS_PREBUILT_DIR\` at it. \`macos-arm64\` is built for \`apple-m1\`,
-          which every arm64 Mac satisfies.
+          The \`x86_64\` archives run on any x86-64: opus's SSE4.1 and AVX2 kernels are
+          compiled per file and selected by CPUID at run time, so a Coffee Lake uses AVX2 and
+          an Ivy Bridge uses SSE4.1 from the same archive. build.sh asserts that no AVX2 or
+          FMA instruction exists outside a \`*_avx2\` kernel. \`macos-arm64\` is built for
+          \`apple-m1\`, which every arm64 Mac satisfies.
 
           ## Checking what you downloaded
 

@@ -6,9 +6,9 @@
 #
 # Targets:
 #   macos-arm64            libopus.a   (Apple silicon, deployment target 11.0)
-#   linux-x86_64           libopus.a   (x86-64-v3 / Coffee Lake floor)
+#   linux-x86_64           libopus.a   (x86-64 baseline; SSE4.1/AVX2 kernels dispatched at run time)
 #   linux-aarch64          libopus.a   (NEON, ARMv8-A)
-#   windows-x86_64-msvc    opus.lib    (x86-64-v3 / Coffee Lake floor, dynamic CRT)
+#   windows-x86_64-msvc    opus.lib    (x86-64 baseline, dispatched the same way; dynamic CRT)
 #
 # Output: dist/<target>/{lib,include}/… plus a MANIFEST naming the version, the
 # checksum, the flags and the SIMD objects that ended up in the archive.
@@ -81,10 +81,12 @@ cflag_supported() {
 # declares. Inert on any CMake that predates the variable.
 cmake_args+=(-DCMAKE_POLICY_VERSION_MINIMUM=3.5)
 
-# Every target here compiles out opus's runtime CPU dispatch and calls the SIMD paths
-# unconditionally (`OPUS_X86_PRESUME_*`, `OPUS_PRESUME_NEON`), because every target here
-# names a floor that guarantees them. `simd_mode` is recorded in the MANIFEST and asserted
-# below; there is no longer a target that leaves the dispatch in.
+# How the SIMD kernels are reached, recorded in the MANIFEST and asserted below. The arm
+# targets *presume* NEON (`OPUS_PRESUME_NEON`): it is mandatory in ARMv8-A, so calling the
+# kernels unconditionally costs no machine. The x86_64 targets keep opus's own runtime
+# *dispatch* (`OPUS_X86_MAY_HAVE_*`, the upstream default): the SSE4.1 and AVX2 kernels are
+# compiled, each file with its own flags, and `opus_select_arch()` picks them by CPUID —
+# so one archive runs on any x86-64 and still uses AVX2 where the CPU has it.
 simd_mode=presume
 # Overwritten by every target below; the `*)` arm exits rather than falling through, so this
 # value never reaches a MANIFEST. It says what it is anyway, because an empty string in a
@@ -114,23 +116,19 @@ case "$target" in
     fi
     ;;
   linux-x86_64)
-    # Coffee Lake as the floor, which is what the projects linking this asked for.
-    # PRESUME_AVX2 is the switch that matters: it makes opus apply `-mavx2 -mfma
-    # -mavx` to the whole library and compile out the CPUID dispatch
-    # (CMakeLists.txt:536-543), so the SSE4.1 and AVX2 kernels are simply *called*
-    # rather than selected. -march=x86-64-v3 extends the same floor to the scalar
-    # code, where the compiler can then autovectorize; -mtune=skylake because Coffee
-    # Lake *is* Skylake's microarchitecture, and tuning changes scheduling only, never
-    # which instructions are allowed.
+    # No floor above the x86-64 baseline, and no `-march`. opus's cmake already does the
+    # right thing here on its own: with `OPUS_X86_MAY_HAVE_SSE4_1` and `_AVX2` (both ON
+    # by default) it compiles the intrinsics files with `-msse4.1` and `-mavx2 -mfma
+    # -mavx` *per file* (CMakeLists.txt:515-530) and leaves the CPUID dispatch in, so a
+    # Coffee Lake still runs the AVX2 NSQ and pitch kernels and an Ivy Bridge runs the
+    # SSE4.1 ones instead of dying on the first `vfmadd`.
     #
-    # Cost of this, stated plainly and deliberately accepted: the artifact executes an
-    # illegal instruction on anything without AVX2 — pre-2013 Intel, pre-Zen AMD, and the
-    # Pentium and Celeron parts *of* the Coffee Lake generation, where it is fused off.
-    # Coffee Lake is the floor the consuming projects asked for; anything below it wants
-    # its own libopus, which LIBOPUS_PREBUILT_DIR exists for.
-    floor='x86-64-v3 / Coffee Lake (AVX2+FMA unconditional)'
-    cmake_args+=(-DOPUS_X86_PRESUME_SSE4_1=ON -DOPUS_X86_PRESUME_AVX2=ON)
-    cflags+=(-march=x86-64-v3 -mtune=skylake)
+    # What a `-march=x86-64-v3` floor bought on top of that was measured before it was
+    # dropped: the scalar code autovectorized, and 60 s of 48 kHz stereo took 0.65% of a
+    # core instead of 0.73%. That is the whole price of running everywhere, and the
+    # consuming projects chose to pay it rather than ship a second archive.
+    floor='x86-64 baseline (SSE4.1 and AVX2 kernels dispatched at run time)'
+    simd_mode=dispatch
     ;;
   linux-aarch64)
     floor='armv8-a (NEON unconditional)'
@@ -143,12 +141,11 @@ case "$target" in
     # Rust's MSVC targets link the dynamic CRT, and a static library built against the
     # static one fails to link with the mismatch that costs everybody an afternoon.
     cmake_args+=(-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL)
-    # Same Coffee Lake floor as linux-x86_64. No flags of our own: on MSVC, PRESUME_AVX2
-    # makes opus add `/arch:AVX2` globally (CMakeLists.txt:547-549), which is the whole of
-    # what cl.exe offers here — there is no `/arch:` level between AVX2 and AVX512, and no
-    # separate tuning flag.
-    floor='x86-64-v3 / Coffee Lake (AVX2+FMA unconditional)'
-    cmake_args+=(-DOPUS_X86_PRESUME_SSE4_1=ON -DOPUS_X86_PRESUME_AVX2=ON)
+    # Same dispatch as linux-x86_64. On MSVC the MAY_HAVE path gives the AVX2 sources
+    # `/arch:AVX2` per file (CMakeLists.txt:526) and everything else the default x86-64
+    # code generation; only PRESUME_AVX2 would have made it global (CMakeLists.txt:547-549).
+    floor='x86-64 baseline (SSE4.1 and AVX2 kernels dispatched at run time)'
+    simd_mode=dispatch
     ;;
   *)
     echo "unknown target: $target" >&2
@@ -214,14 +211,58 @@ esac
 }
 echo "   $found $want $evidence"
 
-# And the second assertion, new with the CPU floors: that the floor this target claims
-# is the floor it was actually built with. Getting this wrong is worse than getting the
-# intrinsics wrong — a library that quietly kept its runtime dispatch is merely slower,
-# while one that quietly *lost* it SIGILLs on a machine below the floor, in the field,
-# for whoever runs the oldest CPU. So the claim is checked rather than trusted.
+# And the second assertion: that the SIMD mode this target claims is the one it was
+# actually built with. Getting this wrong is worse than getting the intrinsics wrong —
+# a dispatch build that quietly *presumed* AVX2 SIGILLs on a machine without it, in the
+# field, for whoever runs the oldest CPU, and one that quietly lost its kernels is merely
+# slower. So the claim is checked rather than trusted.
 echo ">> verifying the CPU floor"
 
 case "$target:$simd_mode" in
+  *x86_64*:dispatch)
+    # The cache proves intent: MAY_HAVE on, PRESUME off, for both ISA levels. A PRESUME
+    # that crept in through a cmake default would read ON here.
+    for opt in OPUS_X86_MAY_HAVE_SSE4_1 OPUS_X86_MAY_HAVE_AVX2; do
+      grep -q "^${opt}:BOOL=ON$" "build/$target/CMakeCache.txt" || {
+        echo "$opt is not ON in the cache — the kernels were not compiled" >&2
+        exit 1
+      }
+    done
+    for opt in OPUS_X86_PRESUME_SSE4_1 OPUS_X86_PRESUME_AVX2; do
+      grep -q "^${opt}:BOOL=OFF$" "build/$target/CMakeCache.txt" || {
+        echo "$opt is not OFF in the cache — this would be an AVX2-only archive" >&2
+        exit 1
+      }
+    done
+    # The archive proves the result, where the tools exist (Unix only; see below): the
+    # dispatcher itself is present, the AVX2 kernels are compiled, and no AVX2 or FMA
+    # instruction sits outside a function named for it — the exact property a global
+    # `-march` would break.
+    if [ "$evidence" = "symbol references" ]; then
+      # A count rather than `grep -q`: under `pipefail`, -q closing the pipe on its first
+      # match makes nm die of SIGPIPE and the whole pipeline report failure.
+      [ "$(nm "$out/lib/$lib_name" 2>/dev/null | grep -c ' T opus_select_arch$' || true)" -gt 0 ] || {
+        echo "no opus_select_arch in $lib_name — the runtime dispatch was compiled out" >&2
+        exit 1
+      }
+      if command -v objdump >/dev/null 2>&1; then
+        leaked="$(objdump -d "$out/lib/$lib_name" 2>/dev/null |
+          awk '/^[0-9a-f]+ <.*>:$/ { fn=$2 } /(vfmadd|vfnmadd|vpbroadcast|vpermd|vperm2i128|vinserti128|vextracti128)/ && fn !~ /avx2/ { print fn }' |
+          sort -u)"
+        [ -z "$leaked" ] || {
+          echo "AVX2/FMA instructions outside the _avx2 kernels — a floor leaked in:" >&2
+          echo "$leaked" | sed 's/^/    /' >&2
+          exit 1
+        }
+        kernels="$(objdump -d "$out/lib/$lib_name" 2>/dev/null | grep -ciE 'vfmadd|vpbroadcast|vpermd' || true)"
+        [ "${kernels:-0}" -gt 0 ] || {
+          echo "no AVX2/FMA instructions in $lib_name — the AVX2 kernels are missing" >&2
+          exit 1
+        }
+        echo "   $kernels AVX2/FMA instructions, all inside _avx2 kernels"
+      fi
+    fi
+    ;;
   *x86_64*:presume)
     # Passed on the command line, so cmake wrote it to the cache verbatim; if opus's
     # `cmake_dependent_option` had refused it — no AVX2 support in the compiler, say —

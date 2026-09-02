@@ -346,13 +346,11 @@ fn cache_root() -> PathBuf {
     home.join("libopus-prebuilt")
 }
 
-/// The repo's target names are not Rust triples — they name *artifacts*, and there are
-/// more of them than triples, because x86_64 has two CPU floors.
+/// The repo's target names are not Rust triples — they name *artifacts*, and several
+/// triples share one.
 fn prebuilt_dir(target: &str) -> &'static str {
-    // One archive per target. The x86_64 ones require AVX2 — Coffee Lake or newer, which is
-    // the floor the consuming projects specified — so there is deliberately no variant here
-    // for a CPU below it. Anything that old wants its own libopus, which is what
-    // LIBOPUS_PREBUILT_DIR is for.
+    // One archive per target. The x86_64 ones run on any x86-64 and pick their SSE4.1 or
+    // AVX2 kernels by CPUID at run time, so there is no per-CPU variant to choose here.
     match target {
         "aarch64-apple-darwin" => "macos-arm64",
         "x86_64-unknown-linux-gnu" | "x86_64-unknown-linux-musl" => "linux-x86_64",
