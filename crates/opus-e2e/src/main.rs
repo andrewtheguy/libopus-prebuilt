@@ -192,7 +192,7 @@ fn fidelity_round_trip(mono: &[f64], cfg: &Config) -> Result<Trip, opus::Error> 
             input.push(r.clamp(-32768.0, 32767.0) as i16);
         }
     }
-    while input.len() % (frame * nch) != 0 {
+    while !input.len().is_multiple_of(frame * nch) {
         input.push(0);
     }
 

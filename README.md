@@ -75,12 +75,18 @@ libopus's arithmetic, and a project with checked-in Opus fixtures would notice).
    an unsupported target, and the way to build with no network whatsoever.
 2. `crates/libopus-prebuilt-sys/prebuilt/<target>/` — what `./build.sh` +
    `./sync-prebuilt.sh` leave behind locally. Gitignored.
-3. the repository's **latest** GitHub release, downloaded once per machine into
-   `$CARGO_HOME/libopus-prebuilt/`.
+3. the repository's **latest** GitHub release, downloaded into
+   `$CARGO_HOME/libopus-prebuilt/<release tag>/` — one directory per release.
 
 (3) is what makes a fresh clone of a consuming project build with nothing installed. The
-cache living under `CARGO_HOME` means the many Docker builds that already cache
-`~/.cargo` get it for free. To confirm which one was used:
+cache living under `CARGO_HOME` means the many Docker builds that already cache `~/.cargo`
+get it for free. It is keyed by the release **tag** and not by the libopus version, because
+`latest` moves: two releases of the same libopus carry different archives, so a directory
+named after the version alone would answer for whichever release this machine downloaded
+first, forever — and the symptom is a feature quietly missing rather than a failure. Asking
+which release `latest` is costs one redirect with no body; where it cannot be asked at all
+(`CARGO_NET_OFFLINE`, or a network that does not answer) the newest cached release is used
+and the provenance line says it was not revalidated. To confirm which one was used:
 
 ```sh
 cargo build -vv 2>&1 | grep 'cargo:info=libopus'
