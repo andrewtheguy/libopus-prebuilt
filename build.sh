@@ -251,7 +251,9 @@ case "$target:$simd_mode" in
           sort -u)"
         [ -z "$leaked" ] || {
           echo "AVX2/FMA instructions outside the _avx2 kernels — a floor leaked in:" >&2
-          echo "$leaked" | sed 's/^/    /' >&2
+          while IFS= read -r line; do
+            printf '    %s\n' "$line"
+          done <<<"$leaked" >&2
           exit 1
         }
         kernels="$(objdump -d "$out/lib/$lib_name" 2>/dev/null | grep -ciE 'vfmadd|vpbroadcast|vpermd' || true)"
