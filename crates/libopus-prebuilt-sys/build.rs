@@ -37,10 +37,9 @@
 // regenerated and committed after every release, which is exactly the maintenance that
 // generating SHA256SUMS at release time avoids.
 //
-// `releases/latest/download/…` rather than a pinned tag: a tag written in here is a tag
-// that has to be updated in here. The asset name carries the opus version, so a release of
-// a *different* version cannot satisfy the URL — it 404s naming the version rather than
-// quietly returning the wrong library.
+// The release is not pinned in this source: `resolve` asks where `latest` points, then downloads
+// both files from that named release so they cannot resolve to different releases. The asset name
+// carries the opus version, so a release of a *different* version is rejected before download.
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -265,13 +264,9 @@ fn latest_release_tag(repo: &str) -> Option<String> {
         return None;
     }
 
-    // The null device is the *host's*, since curl runs here rather than on the target, which is
-    // exactly what `cfg!` reports in a build script.
-    let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
     let url = format!("https://github.com/{repo}/releases/latest");
     let out = Command::new("curl")
-        .args(["-sS", "--fail", "--head", "--max-time", "30", "--retry", "2", "-o", null])
-        .args(["-w", "%{redirect_url}", &url])
+        .args(["-sS", "--fail", "--head", "--max-time", "30", "--retry", "2", &url])
         .output()
         .unwrap_or_else(|e| panic!("cannot run curl: {e}"));
 
@@ -289,7 +284,17 @@ fn latest_release_tag(repo: &str) -> Option<String> {
     if !out.status.success() {
         return stale(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
-    let location = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    // Read the header instead of asking curl's `--write-out` for `redirect_url`: the curl 8.8.0
+    // shipped in Windows Server returns CURLE_BAD_FUNCTION_ARGUMENT (43) for every `-w`, even
+    // though this same HEAD succeeds. A reverse search also selects the final response if a
+    // proxy prepends its own header block.
+    let headers = String::from_utf8_lossy(&out.stdout);
+    let Some(location) = headers.lines().rev().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("location").then_some(value.trim())
+    }) else {
+        return stale(format!("{url} returned no Location header"));
+    };
     let Some((_, tag)) = location.rsplit_once("/releases/tag/") else {
         return stale(format!("{url} redirected to '{location}'"));
     };

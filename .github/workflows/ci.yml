@@ -170,7 +170,7 @@ jobs:
           # Which source satisfied the link, asserted rather than assumed: if a stray
           # archive or a system libopus had satisfied it, this job would pass while testing
           # nothing at all.
-          grep -q 'linked statically from latest release asset' build.log || {
+          grep -Eq 'linked statically from v[^ ]+ asset for linux-x86_64' build.log || {
             echo "::error::the archive did not come from the release"
             exit 1
           }
