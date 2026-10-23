@@ -6,7 +6,7 @@ name: Release libopus archives
 # rather than repeating it — so the archives that get published are the ones that passed
 # the same tests, run by the same code, and a failure anywhere in there means no release.
 #
-# Draft first, publish last, following remotex's release.yml. The property that buys:
+# Draft first, publish last, following zDesk's release.yml. The property that buys:
 # **a draft release does not create the git tag.** Everything — four builds, their tests,
 # the e2e binaries, packaging, upload — happens while the tag still does not exist, and the
 # tag appears only when the draft is published at the very end. A cancelled or failed
@@ -70,7 +70,7 @@ jobs:
           stamp="$(date -u +%Y%m%d%H%M%S)-${GITHUB_SHA:0:7}"
           tag="v${OPUS_VERSION}-${stamp}"
           # Never `latest` off a branch: a release built from anything but the default
-          # branch is a prerelease, exactly as in remotex.
+          # branch is a prerelease, exactly as in zDesk.
           is_prerelease=false
           [ "$GITHUB_REF_NAME" = "${{ github.event.repository.default_branch }}" ] || is_prerelease=true
 

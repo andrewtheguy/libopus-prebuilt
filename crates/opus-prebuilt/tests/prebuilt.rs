@@ -44,9 +44,9 @@ fn encodes_like_save_audio_stream() {
     assert_eq!(opus::packet::get_nb_samples(&packet, RATE).unwrap(), FRAME);
 }
 
-/// `remotex`'s side: a stereo decoder fed real packets.
+/// zDesk's side: a stereo decoder fed real packets.
 #[test]
-fn decodes_like_remotex() {
+fn decodes_like_zdesk() {
     let mut encoder = Encoder::new(RATE, Channels::Stereo, Application::Audio).unwrap();
     let packet = encoder.encode_vec(&frame(2), 4000).unwrap();
 
