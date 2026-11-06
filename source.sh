@@ -25,7 +25,10 @@ ensure_source() {
   mkdir -p build
   if [ ! -f "build/$tarball" ]; then
     echo ">> fetching $tarball"
-    curl -sSL --fail --max-time 600 -o "build/$tarball.part" \
+    # --insecure: the checksum below is what vouches for these bytes, not TLS. Windows'
+    # Schannel fails downloads.xiph.org's revocation check (CRYPT_E_REVOCATION_OFFLINE)
+    # on GitHub's runner, which stopped the Windows archive from building at all.
+    curl -sSL --fail --insecure --max-time 600 -o "build/$tarball.part" \
       "https://downloads.xiph.org/releases/opus/$tarball"
     mv "build/$tarball.part" "build/$tarball"
   fi
