@@ -24,12 +24,24 @@ ensure_source() {
 
   mkdir -p build
   if [ ! -f "build/$tarball" ]; then
-    echo ">> fetching $tarball"
     # --insecure: the checksum below is what vouches for these bytes, not TLS. Windows'
-    # Schannel fails downloads.xiph.org's revocation check (CRYPT_E_REVOCATION_OFFLINE)
-    # on GitHub's runner, which stopped the Windows archive from building at all.
-    curl -sSL --fail --insecure --max-time 600 -o "build/$tarball.part" \
-      "https://downloads.xiph.org/releases/opus/$tarball"
+    # Schannel fails these hosts' revocation check (CRYPT_E_REVOCATION_OFFLINE) on
+    # GitHub's runner. For the same reason any mirror will do: xiph's own host drops
+    # GitHub runners' connections now and then, and OSUOSL mirrors its releases.
+    local url fetched=
+    for url in "https://downloads.xiph.org/releases/opus/$tarball" \
+      "https://ftp.osuosl.org/pub/xiph/releases/opus/$tarball"; do
+      echo ">> fetching $url"
+      if curl -sSL --fail --insecure --max-time 600 -o "build/$tarball.part" "$url"; then
+        fetched=1
+        break
+      fi
+    done
+    [ -n "$fetched" ] || {
+      rm -f "build/$tarball.part"
+      echo "cannot fetch $tarball from any mirror" >&2
+      return 1
+    }
     mv "build/$tarball.part" "build/$tarball"
   fi
 
